@@ -3,4 +3,4 @@ type: messaging
 nodes:
   x:
     qa.process: { welcome: "Hi" }
-    tool.exec: { name: foo }
+    mcp.exec: { component: "foo" }

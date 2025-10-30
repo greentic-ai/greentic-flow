@@ -19,8 +19,8 @@ nodes:
       - to: forecast_weather
 
   forecast_weather:
-    tool.exec:
-      name: weather_api
+    mcp.exec:
+      component: weather_api
       action: forecast_weather
       args:
         q: in.q_location

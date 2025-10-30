@@ -12,7 +12,7 @@ fn load_weather_ir_and_resolve_params() {
     assert_eq!(ir.flow_type, "messaging");
 
     let fw = ir.nodes.get("forecast_weather").unwrap();
-    assert_eq!(fw.component, "tool.exec");
+    assert_eq!(fw.component, "mcp.exec");
 
     let resolved =
         resolve_parameters(&fw.payload_expr, &ir.parameters, "nodes.forecast_weather").unwrap();

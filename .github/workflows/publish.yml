@@ -20,9 +20,23 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['version'])")
           echo "crate_version=$version" >> "$GITHUB_OUTPUT"
       - name: Publish to crates.io
-        run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -eo pipefail
+          echo "Publishing greentic-flow to crates.io"
+          set +e
+          publish_output=$(cargo publish --locked 2>&1)
+          publish_status=$?
+          set -e
+          echo "$publish_output"
+          if [ "$publish_status" -ne 0 ]; then
+            if echo "$publish_output" | grep -qi "already uploaded"; then
+              echo "Version already published on crates.io; continuing."
+            else
+              exit "$publish_status"
+            fi
+          fi
       - name: Create GitHub release
         uses: actions/create-release@v1
         with:
