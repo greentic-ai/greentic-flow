@@ -8,7 +8,9 @@ pub enum FlowError {
     Schema(String),
     #[error("Node '{0}' must contain exactly one component key like 'qa.process' plus optional 'routing'")]
     NodeComponentShape(String),
-    #[error("Invalid component key '{0}' in node '{1}'")]
+    #[error(
+        "Invalid component key '{0}' in node '{1}' (must match ^[A-Za-z][\\w.-]*\\.[\\w.-]+$)"
+    )]
     BadComponentKey(String, String),
     #[error("Missing node '{0}' referenced in routing from '{1}'")]
     MissingNode(String, String),

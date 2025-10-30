@@ -10,6 +10,7 @@ fn load_weather_ir_and_resolve_params() {
 
     assert_eq!(ir.id, "weather_bot");
     assert_eq!(ir.flow_type, "messaging");
+    assert_eq!(ir.start.as_deref(), Some("in"));
 
     let fw = ir.nodes.get("forecast_weather").unwrap();
     assert_eq!(fw.component, "mcp.exec");

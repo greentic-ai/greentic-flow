@@ -7,6 +7,7 @@ Generic schema, loader, and intermediate representation for YGTC flows composed 
 - Loader converts YAML documents to `FlowDoc`, validates against the schema, extracts component metadata, and performs basic graph checks.
 - IR (`FlowIR`) keeps nodes generic and serde-friendly so runtimes can post-process component payloads.
 - `resolve::resolve_parameters` pre-resolves only `parameters.*` references, leaving other runtime bindings intact.
+- `start` is optional; if omitted and an `in` node exists, the loader defaults `start` to `in`.
 
 ## Usage
 ```rust
@@ -27,3 +28,11 @@ let resolved = resolve_parameters(&node.payload_expr, &ir.parameters, "nodes.for
 - `cargo test`
 
 Fixtures under `fixtures/` mirror common success and failure scenarios.
+
+## CLI
+
+Run `cargo run --bin ygtc-lint -- <paths>` to validate flows. Example:
+
+```
+cargo run --bin ygtc-lint -- fixtures --schema schemas/ygtc.flow.schema.json
+```

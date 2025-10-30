@@ -81,5 +81,9 @@ pub fn load_ygtc_from_str(yaml: &str, schema_path: &Path) -> Result<FlowDoc> {
         }
     }
 
+    if flow.start.is_none() && flow.nodes.contains_key("in") {
+        flow.start = Some("in".to_string());
+    }
+
     Ok(flow)
 }
