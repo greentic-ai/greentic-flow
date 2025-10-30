@@ -27,14 +27,14 @@ fn validate_json(doc: &Value, schema_path: &Path) -> Result<()> {
 }
 
 pub fn load_ygtc_from_str(yaml: &str, schema_path: &Path) -> Result<FlowDoc> {
-    let v_yaml: serde_yaml::Value =
-        serde_yaml::from_str(yaml).map_err(|e| FlowError::Yaml("string".into(), e.to_string()))?;
+    let v_yaml: serde_yaml_bw::Value =
+        serde_yaml_bw::from_str(yaml).map_err(|e| FlowError::Yaml("string".into(), e.to_string()))?;
     let v_json: Value = serde_json::to_value(&v_yaml)
         .map_err(|e| FlowError::Internal(format!("yaml->json: {e}")))?;
     validate_json(&v_json, schema_path)?;
 
     let mut flow: FlowDoc =
-        serde_yaml::from_str(yaml).map_err(|e| FlowError::Yaml("string".into(), e.to_string()))?;
+        serde_yaml_bw::from_str(yaml).map_err(|e| FlowError::Yaml("string".into(), e.to_string()))?;
 
     let node_ids: Vec<String> = flow.nodes.keys().cloned().collect();
     for id in &node_ids {
