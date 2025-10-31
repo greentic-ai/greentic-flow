@@ -67,3 +67,9 @@ The CLI recursively walks any directories provided, only inspecting files with a
 - Keep shared primitives flowing through `greentic-types` and `greentic-interfaces`.
 - Prefer zero-copy patterns and stay within safe Rust (`#![forbid(unsafe_code)]` is enabled).
 - Update the adapter registry fixtures under `tests/data/` when new adapters or operations are introduced.
+
+## Releases & Publishing
+- Crate versions are sourced directly from each crate's `Cargo.toml`.
+- Every push to `master` compares the previous commit; if a crate version changed, a tag `<crate-name>-v<semver>` is created and pushed automatically.
+- The publish workflow runs on the tagged commit and attempts to publish all changed crates to crates.io using `katyo/publish-crates@v2`.
+- Publishing is idempotent: if the version already exists on crates.io, the workflow succeeds without error.

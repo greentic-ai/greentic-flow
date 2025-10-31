@@ -1,55 +1,41 @@
-name: Publish crate
+name: Publish crates (single or workspace)
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [ master ]
+    tags: [ "v*" ]
+  workflow_dispatch:
 
 jobs:
-  publish:
+  build-test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Extract crate version
-        id: metadata
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint & Test
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['version'])")
-          echo "crate_version=$version" >> "$GITHUB_OUTPUT"
-      - name: Publish to crates.io
-        id: publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          echo "published=false" >> "$GITHUB_OUTPUT"
-          set -eo pipefail
-          echo "Publishing greentic-flow to crates.io"
-          set +e
-          publish_output=$(cargo publish --locked 2>&1)
-          publish_status=$?
-          set -e
-          echo "$publish_output"
-          if [ "$publish_status" -ne 0 ]; then
-            if echo "$publish_output" | grep -qi "already uploaded"; then
-              echo "Version already published on crates.io; continuing."
-              echo "published=false" >> "$GITHUB_OUTPUT"
-            else
-              exit "$publish_status"
-            fi
-          else
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Create GitHub release
-        if: steps.publish.outputs.published == 'true'
-        uses: actions/create-release@v1
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo build --workspace --all-features
+          cargo test --workspace --all-features -- --nocapture
+
+  publish:
+    if: github.event_name == 'push'
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish changed crates
+        uses: katyo/publish-crates@v2
         with:
-          tag_name: v${{ steps.metadata.outputs.crate_version }}
-          release_name: greentic-flow v${{ steps.metadata.outputs.crate_version }}
-          body: |
-            Automated release for greentic-flow v${{ steps.metadata.outputs.crate_version }}.
-          commitish: ${{ github.sha }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          path: .
+          registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          ignore-unpublished-changes: true
+          check-repo: true
+          dry-run: false
