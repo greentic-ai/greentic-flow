@@ -20,7 +20,7 @@
       "patternProperties": {
         "^[a-zA-Z_][\\w-]*$": {
           "type": "object",
-          "description": "A node must have exactly one component key like qa.process/tool.exec/templating.handlebars plus optional routing.",
+          "description": "A node must have exactly one component key like messaging.telegram.sendMessage (namespace.adapter.operation) plus optional routing.",
           "minProperties": 1,
           "maxProperties": 2,
           "properties": {
@@ -38,8 +38,8 @@
           },
           "patternProperties": {
             "^[a-zA-Z][\\w.-]*\\.[\\w.-]+$": {
-              "type": "object",
-              "description": "Opaque component payload – validated by the component itself.",
+            "type": "object",
+            "description": "Opaque component payload – validated by the component itself. Adapter-backed components should follow the <namespace>.<adapter>.<operation> shape.",
               "additionalProperties": true
             }
           },

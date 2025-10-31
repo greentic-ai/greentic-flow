@@ -1,7 +1,11 @@
+#![forbid(unsafe_code)]
+
 pub mod error;
 pub mod ir;
+pub mod lint;
 pub mod loader;
 pub mod model;
+pub mod registry;
 pub mod resolve;
 pub mod util;
 
