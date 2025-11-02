@@ -1,6 +1,6 @@
 [package]
 name = "greentic-flow"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 license = "MIT"
 description = "Generic YGTC flow schema/loader/IR for self-describing component nodes."
@@ -13,8 +13,8 @@ toml = ["dep:toml"]
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-greentic-interfaces = "^0.4.3"
-greentic-types = "^0.1.4"
+greentic-interfaces = "^0.4"
+greentic-types = "^0.1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml_bw = "2"
 serde_json = "1"
