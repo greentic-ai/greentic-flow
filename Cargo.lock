@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-flow"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -764,9 +764,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-interfaces"
-version = "0.4.17"
+version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fc6fe180965561bb887e3dd94142fbd6f5743d73019394b0eb57562e0984fa9"
+checksum = "a855a4f822e2cea468a90ab254e4db12cbc1c2c24da98d1b5680e7c8254ba389"
 dependencies = [
  "anyhow",
  "greentic-types",
@@ -781,9 +781,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-telemetry"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d79d5f422f2912aeb031f632838db346cb2e630dba9afff1c53ddf0034d48f9b"
+checksum = "dcdebdf722c62350b0be91a24d320b782118ea301cdf7981814cf2942b57dc3a"
 dependencies = [
  "once_cell",
  "opentelemetry",
