@@ -63,6 +63,11 @@ cargo run --bin ygtc-lint -- \
 
 The CLI recursively walks any directories provided, only inspecting files with a `.ygtc` extension. Schema validation always runs; adapter checks are additive when a registry is supplied.
 
+## Environment
+- `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`) targets your collector.
+- `RUST_LOG` controls log verbosity; e.g. `greentic_flow=info`.
+- `OTEL_RESOURCE_ATTRIBUTES=deployment.environment=dev` tags spans with the active environment.
+
 ## Maintenance Notes
 - Keep shared primitives flowing through `greentic-types` and `greentic-interfaces`.
 - Prefer zero-copy patterns and stay within safe Rust (`#![forbid(unsafe_code)]` is enabled).

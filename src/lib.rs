@@ -1,3 +1,6 @@
+//! Downstream runtimes must set the current tenant telemetry context via
+//! `greentic_types::telemetry::set_current_tenant_ctx` before executing flows
+//! (for example, prior to `FlowEngine::run` in the host runner).
 #![forbid(unsafe_code)]
 
 pub mod error;

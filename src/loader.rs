@@ -3,7 +3,7 @@ use crate::{
     model::FlowDoc,
     util::COMP_KEY_RE,
 };
-use jsonschema::{Draft, JSONSchema};
+use jsonschema::Draft;
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
@@ -12,16 +12,16 @@ fn validate_json(doc: &Value, schema_path: &Path) -> Result<()> {
         .map_err(|e| FlowError::Internal(format!("schema read: {e}")))?;
     let schema: Value = serde_json::from_str(&schema_text)
         .map_err(|e| FlowError::Internal(format!("schema parse: {e}")))?;
-    let compiled = JSONSchema::options()
+    let validator = jsonschema::options()
         .with_draft(Draft::Draft202012)
-        .compile(&schema)
+        .build(&schema)
         .map_err(|e| FlowError::Internal(format!("schema compile: {e}")))?;
-    if let Err(iter) = compiled.validate(doc) {
-        let mut errs = vec![];
-        for e in iter {
-            errs.push(format!("at {}: {}", e.instance_path, e));
-        }
-        return Err(FlowError::Schema(errs.join("\n")));
+    let errors: Vec<String> = validator
+        .iter_errors(doc)
+        .map(|e| format!("at {}: {}", e.instance_path, e))
+        .collect();
+    if !errors.is_empty() {
+        return Err(FlowError::Schema(errors.join("\n")));
     }
     Ok(())
 }

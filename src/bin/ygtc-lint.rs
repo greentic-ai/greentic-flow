@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result as AnyResult};
 use clap::Parser;
 use greentic_flow::{
     lint::{lint_builtin_rules, lint_with_registry},
@@ -10,7 +10,6 @@ use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
-    process,
 };
 
 #[derive(Parser, Debug)]
@@ -31,14 +30,12 @@ struct Cli {
     targets: Vec<PathBuf>,
 }
 
-fn main() {
-    if let Err(err) = run() {
-        eprintln!("{err}");
-        process::exit(1);
-    }
+#[greentic_types::telemetry::main(service_name = "greentic-flow")]
+async fn main() -> AnyResult<()> {
+    run()
 }
 
-fn run() -> Result<()> {
+fn run() -> AnyResult<()> {
     let cli = Cli::parse();
     let registry = if let Some(path) = &cli.registry {
         Some(AdapterCatalog::load_from_file(path)?)
@@ -64,7 +61,7 @@ fn lint_path(
     schema: &Path,
     registry: Option<&AdapterCatalog>,
     failures: &mut usize,
-) -> Result<()> {
+) -> AnyResult<()> {
     if path.is_file() {
         lint_file(path, schema, registry, failures)?;
     } else if path.is_dir() {
@@ -84,7 +81,7 @@ fn lint_file(
     schema: &Path,
     registry: Option<&AdapterCatalog>,
     failures: &mut usize,
-) -> Result<()> {
+) -> AnyResult<()> {
     if path.extension() != Some(OsStr::new("ygtc")) {
         return Ok(());
     }

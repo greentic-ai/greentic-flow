@@ -1,6 +1,6 @@
 [package]
 name = "greentic-flow"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -15,18 +15,24 @@ toml = ["dep:toml"]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 greentic-interfaces = "^0.4"
-greentic-types = "^0.2"
+greentic-types = { version = "^0.2", features = ["telemetry-autoinit"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml_bw = "2"
 serde_json = "1"
-jsonschema = { version = "0.17", features = ["draft202012"] }
+jsonschema = { version = "0.33"}
 thiserror = "2"
 regex = "1"
 indexmap = { version = "2", features = ["serde"] }
 lazy_static = "1"
 toml = { version = "0.9", optional = true }
+tracing = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
 assert_cmd = "2"
 pretty_assertions = "1"
 insta = "1"
+
+[patch.crates-io]
+greentic-types = { path = "../greentic-types" }
+greentic-interfaces = { path = "../greentic-interfaces/crates/greentic-interfaces" }
