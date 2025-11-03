@@ -12,7 +12,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
+          toolchain: stable
+          override: true
           components: rustfmt
       - name: cargo fmt --check
         run: cargo fmt --check
@@ -23,7 +24,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
+          toolchain: stable
+          override: true
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
@@ -35,7 +37,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
+          toolchain: stable
+          override: true
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --all-features
