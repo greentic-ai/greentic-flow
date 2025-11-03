@@ -14,8 +14,8 @@ toml = ["dep:toml"]
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-greentic-interfaces = "^0.4"
-greentic-types = { version = "^0.2", features = ["telemetry-autoinit"] }
+greentic-interfaces = "0.4.17"
+greentic-types = { version = "0.2.2", features = ["telemetry-autoinit"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml_bw = "2"
 serde_json = "1"
@@ -34,5 +34,5 @@ pretty_assertions = "1"
 insta = "1"
 
 [patch.crates-io]
-greentic-types = { path = "../greentic-types" }
 greentic-interfaces = { path = "../greentic-interfaces/crates/greentic-interfaces" }
+greentic-types = { path = "../greentic-types" }
