@@ -765,6 +765,8 @@ dependencies = [
 [[package]]
 name = "greentic-interfaces"
 version = "0.4.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc6fe180965561bb887e3dd94142fbd6f5743d73019394b0eb57562e0984fa9"
 dependencies = [
  "anyhow",
  "greentic-types",
@@ -797,6 +799,8 @@ dependencies = [
 [[package]]
 name = "greentic-types"
 version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca06a03906add513c53951ba44f9d83efef547029cd09e61c89d9fff9ecd3338"
 dependencies = [
  "greentic-telemetry",
  "greentic-types-macros",
@@ -814,6 +818,8 @@ dependencies = [
 [[package]]
 name = "greentic-types-macros"
 version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f4e0703e3560267ebbfe77be9f67bc4f0898b7889073459b91b3dde8ab5fe80"
 dependencies = [
  "proc-macro2",
  "quote",

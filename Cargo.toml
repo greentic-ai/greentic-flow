@@ -32,7 +32,3 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 assert_cmd = "2"
 pretty_assertions = "1"
 insta = "1"
-
-[patch.crates-io]
-greentic-interfaces = { path = "../greentic-interfaces/crates/greentic-interfaces" }
-greentic-types = { path = "../greentic-types" }
