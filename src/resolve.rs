@@ -51,7 +51,7 @@ fn lookup(root: &Value, path: &str, loc: &str) -> Result<Value> {
             _ => {
                 return Err(FlowError::Internal(format!(
                     "parameters.{path} at {loc} not an object"
-                )))
+                )));
             }
         };
     }

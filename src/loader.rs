@@ -73,10 +73,11 @@ pub fn load_ygtc_from_str(yaml: &str, schema_path: &Path) -> Result<FlowDoc> {
 
     for (from_id, node) in &flow.nodes {
         for route in &node.routing {
-            if let Some(to) = &route.to {
-                if to != "out" && !flow.nodes.contains_key(to) {
-                    return Err(FlowError::MissingNode(to.clone(), from_id.clone()));
-                }
+            if let Some(to) = &route.to
+                && to != "out"
+                && !flow.nodes.contains_key(to)
+            {
+                return Err(FlowError::MissingNode(to.clone(), from_id.clone()));
             }
         }
     }

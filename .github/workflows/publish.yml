@@ -12,6 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: Lint & Test
         run: |
@@ -30,6 +32,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: Publish changed crates
         uses: katyo/publish-crates@v2

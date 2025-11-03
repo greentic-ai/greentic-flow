@@ -14,8 +14,10 @@ fn adapter_nodes_fail_with_missing_operations() {
     let errors = lint_with_registry(&ir, &catalog);
 
     assert_eq!(errors.len(), 2, "expected exactly two lint errors");
-    assert!(errors
-        .iter()
-        .any(|e| e.contains("messaging.telegram.deleteUniverse")));
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("messaging.telegram.deleteUniverse"))
+    );
     assert!(errors.iter().any(|e| e.contains("email.google.beamMeUp")));
 }

@@ -1,5 +1,5 @@
 use crate::{
-    ir::{classify_node_type, FlowIR, NodeKind},
+    ir::{FlowIR, NodeKind, classify_node_type},
     registry::AdapterCatalog,
 };
 
