@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# Usage:
+#   LOCAL_CHECK_ONLINE=1 LOCAL_CHECK_STRICT=1 ci/local_check.sh
+# Defaults: offline, non-strict.
+
+set -euo pipefail
+
+LOCAL_CHECK_ONLINE=${LOCAL_CHECK_ONLINE:-0}
+LOCAL_CHECK_STRICT=${LOCAL_CHECK_STRICT:-0}
+LOCAL_CHECK_VERBOSE=${LOCAL_CHECK_VERBOSE:-0}
+
+if [[ "${LOCAL_CHECK_VERBOSE}" == "1" ]]; then
+  set -x
+fi
+
+need() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+step() {
+  echo ""
+  echo "▶ $*"
+}
+
+skip_step() {
+  local reason=$1
+  if [[ "${LOCAL_CHECK_STRICT}" == "1" ]]; then
+    echo "[FAIL] ${reason}"
+    exit 1
+  else
+    echo "[skip] ${reason}"
+  fi
+}
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
+
+step "Toolchain versions"
+if need rustc; then
+  rustc --version
+else
+  skip_step "rustc not found"
+fi
+if need cargo; then
+  cargo --version
+else
+  skip_step "cargo not found"
+fi
+
+step "cargo fmt --all -- --check"
+if need cargo; then
+  cargo fmt --all -- --check
+else
+  skip_step "cargo fmt requires cargo"
+fi
+
+step "cargo clippy --all-targets --all-features -D warnings"
+if need cargo; then
+  cargo clippy --all-targets --all-features -- -D warnings
+else
+  skip_step "cargo clippy requires cargo"
+fi
+
+step "cargo build --workspace --locked"
+if need cargo; then
+  cargo build --workspace --locked
+else
+  skip_step "cargo build requires cargo"
+fi
+
+step "cargo test --all-features"
+if need cargo; then
+  cargo test --all-features
+else
+  skip_step "cargo test requires cargo"
+fi
+
+step "ygtc-lint --json smoke test"
+if ! need python3; then
+  skip_step "python3 required for smoke test"
+elif ! need cargo && [[ ! -x target/debug/ygtc-lint ]]; then
+  skip_step "cargo required to build ygtc-lint"
+else
+  if [[ ! -x target/debug/ygtc-lint ]]; then
+    cargo build --quiet --bin ygtc-lint
+  fi
+  ./target/debug/ygtc-lint --json tests/data/flow_ok.ygtc | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data'
+fi
+
+step "Verify published schema \$id"
+if [[ "${LOCAL_CHECK_ONLINE}" != "1" ]]; then
+  skip_step "online schema check disabled (set LOCAL_CHECK_ONLINE=1)"
+elif ! need curl; then
+  skip_step "curl required for schema check"
+elif ! need python3; then
+  skip_step "python3 required for schema check"
+else
+  url="https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json"
+  tmp_schema="$(mktemp)"
+  curl -sSf "${url}" -o "${tmp_schema}"
+  python3 - <<PY
+import json, pathlib, sys
+published = json.load(open("${tmp_schema}"))
+local = json.load(open("schemas/ygtc.flow.schema.json"))
+expected = "https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json"
+if published.get("$id") != expected:
+    raise SystemExit(f"Published schema \$id mismatch: {published.get('$id')}")
+if local.get("$id") != expected:
+    raise SystemExit(f"Local schema \$id mismatch: {local.get('$id')}")
+PY
+  rm -f "${tmp_schema}"
+fi
+
+echo ""
+echo "✅ local_check completed"

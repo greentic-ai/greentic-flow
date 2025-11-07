@@ -46,6 +46,18 @@ With the registry loaded, the `adapter_resolvable` rule reports any node whose c
 
 Fixtures under `fixtures/` mirror common success and failure scenarios.
 
+Run all CI-equivalent checks locally via:
+
+```
+LOCAL_CHECK_ONLINE=1 ci/local_check.sh
+```
+
+Toggles:
+
+- `LOCAL_CHECK_ONLINE=1` — enable networked checks (schema fetch, etc.)
+- `LOCAL_CHECK_STRICT=1` — treat missing tools as failures
+- `LOCAL_CHECK_VERBOSE=1` — echo each command
+
 ## CLI
 
 Run `cargo run --bin ygtc-lint -- <paths>` to validate flows. Example:
