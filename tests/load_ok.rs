@@ -1,7 +1,4 @@
-use greentic_flow::{
-    FlowBundleVersion, load_and_validate, loader::load_ygtc_from_str, resolve::resolve_parameters,
-    to_ir,
-};
+use greentic_flow::{loader::load_ygtc_from_str, resolve::resolve_parameters, to_ir};
 use serde_json::json;
 use std::path::Path;
 
@@ -25,19 +22,4 @@ fn load_weather_ir_and_resolve_params() {
         resolved.pointer("/args/q").unwrap(),
         &json!("in.q_location")
     );
-}
-
-#[test]
-fn bundle_uses_embedded_schema() {
-    let yaml = std::fs::read_to_string("fixtures/weather_bot.ygtc").unwrap();
-    let bundle = load_and_validate(&yaml).unwrap();
-    assert_eq!(bundle.version, FlowBundleVersion::V1);
-    assert_eq!(bundle.flow().id, "weather_bot");
-}
-
-#[test]
-fn smoke_example_flow_loads() {
-    let yaml = std::fs::read_to_string("examples/smoke.ygtc").unwrap();
-    let bundle = load_and_validate(&yaml).unwrap();
-    assert_eq!(bundle.flow().id, "smoke_example");
 }

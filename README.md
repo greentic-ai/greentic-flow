@@ -4,18 +4,18 @@ Generic schema, loader, and intermediate representation for YGTC flows composed 
 
 ## Quickstart
 ```rust
-use greentic_flow::{load_and_validate, resolve::resolve_parameters, to_ir};
+use greentic_flow::{load_and_validate_bundle, resolve::resolve_parameters, loader, to_ir};
 
 let yaml = std::fs::read_to_string("fixtures/weather_bot.ygtc")?;
-let bundle = load_and_validate(&yaml)?;
-let ir = to_ir(bundle.into_flow())?;
+let bundle = load_and_validate_bundle(&yaml, None)?;
+println!("Bundle entry node: {}", bundle.entry);
+
+let flow = loader::load_ygtc_from_str(&yaml, std::path::Path::new("schemas/ygtc.flow.schema.json"))?;
+let ir = to_ir(flow)?;
 let node = ir.nodes.get("forecast_weather").unwrap();
 let resolved = resolve_parameters(&node.payload_expr, &ir.parameters, "nodes.forecast_weather")?;
 # Ok::<_, greentic_flow::error::FlowError>(())
 ```
-
-`loader::load_ygtc_from_str_with_source` remains available if you need to validate
-against a custom schema and keep diagnostic paths tied to the original file.
 
 ## Design Highlights
 - JSON Schema (`schemas/ygtc.flow.schema.json`) enforces exactly one component key per node plus optional routing metadata.
@@ -63,7 +63,31 @@ cargo run --bin ygtc-lint -- \
   tests/data/flow_ok.ygtc
 ```
 
+For machine-readable CI, use `--json`; the command exits non-zero on any error and
+prints the validated bundle plus diagnostics:
+
+```
+cargo run --bin ygtc-lint -- --json tests/data/flow_ok.ygtc
+# { "ok": true, "bundle": { "id": "flow_ok", ... } }
+```
+
+Pipelines can also stream flows via stdin:
+
+```
+cat tests/data/flow_ok.ygtc | cargo run --bin ygtc-lint -- --json --stdin
+```
+
+And in CI you can assert the BLAKE3 hash is present:
+
+```
+ygtc-lint --json --stdin < flow.ygtc | jq -e '.ok and .hash_blake3 != null'
+```
+
 The CLI recursively walks any directories provided, only inspecting files with a `.ygtc` extension. Schema validation always runs; adapter checks are additive when a registry is supplied.
+
+The shared flow schema is published from this repository at
+`https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json`
+and matches the `$id` embedded in `schemas/ygtc.flow.schema.json`.
 
 ## Environment
 - `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`) targets your collector.

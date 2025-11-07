@@ -15,6 +15,8 @@ jobs:
           toolchain: stable
           override: true
           components: rustfmt
+      - name: rustc --version
+        run: rustc --version
       - name: cargo fmt --check
         run: cargo fmt --check
 
@@ -27,6 +29,8 @@ jobs:
           toolchain: stable
           override: true
           components: clippy
+      - name: rustc --version
+        run: rustc --version
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -39,6 +43,27 @@ jobs:
         with:
           toolchain: stable
           override: true
+      - name: rustc --version
+        run: rustc --version
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --all-features
+      - name: ygtc-lint --json smoke
+        run: |
+          cargo run --bin ygtc-lint -- --json tests/data/flow_ok.ygtc | python - <<'PY'
+          import json, sys
+          data = json.load(sys.stdin)
+          assert data.get("ok") is True, data
+          PY
+      - name: verify published schema $id
+        run: |
+          url="https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json"
+          curl -sSf "$url" -o /tmp/published-schema.json
+          python - <<'PY'
+          import json, pathlib
+          published = json.load(open("/tmp/published-schema.json"))
+          local = json.load(open("schemas/ygtc.flow.schema.json"))
+          expected = "https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json"
+          assert published.get("$id") == expected, published.get("$id")
+          assert local.get("$id") == expected, local.get("$id")
+          PY

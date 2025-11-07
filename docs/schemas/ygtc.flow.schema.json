@@ -1,0 +1,5 @@
+---
+layout: null
+permalink: /schemas/ygtc.flow.schema.json
+---
+{% include_relative ../../schemas/ygtc.flow.schema.json %}

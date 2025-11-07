@@ -14,18 +14,22 @@ fn validate_json(
     doc: &Value,
     schema_text: &str,
     schema_label: &str,
+    schema_path: Option<&Path>,
     source_label: &str,
+    source_path: Option<&Path>,
 ) -> Result<()> {
     let schema: Value = serde_json::from_str(schema_text).map_err(|e| FlowError::Internal {
         message: format!("schema parse for {schema_label}: {e}"),
-        location: FlowErrorLocation::at_path(schema_label.to_string()),
+        location: FlowErrorLocation::at_path(schema_label.to_string())
+            .with_source_path(schema_path),
     })?;
     let validator = jsonschema::options()
         .with_draft(Draft::Draft202012)
         .build(&schema)
         .map_err(|e| FlowError::Internal {
             message: format!("schema compile for {schema_label}: {e}"),
-            location: FlowErrorLocation::at_path(schema_label.to_string()),
+            location: FlowErrorLocation::at_path(schema_label.to_string())
+                .with_source_path(schema_path),
         })?;
     let details: Vec<SchemaErrorDetail> = validator
         .iter_errors(doc)
@@ -38,7 +42,9 @@ fn validate_json(
             };
             SchemaErrorDetail {
                 message: e.to_string(),
-                location: FlowErrorLocation::at_path(format!("{source_label}{pointer}")),
+                location: FlowErrorLocation::at_path(format!("{source_label}{pointer}"))
+                    .with_source_path(source_path)
+                    .with_json_pointer(Some(pointer.clone())),
             }
         })
         .collect();
@@ -57,7 +63,8 @@ fn validate_json(
         return Err(FlowError::Schema {
             message,
             details,
-            location: FlowErrorLocation::at_path(source_label.to_string()),
+            location: FlowErrorLocation::at_path(source_label.to_string())
+                .with_source_path(source_path),
         });
     }
     Ok(())
@@ -75,40 +82,57 @@ pub fn load_ygtc_from_str_with_source(
     let schema_label = schema_path.display().to_string();
     let schema_text = std::fs::read_to_string(schema_path).map_err(|e| FlowError::Internal {
         message: format!("schema read from {schema_label}: {e}"),
-        location: FlowErrorLocation::at_path(schema_label.clone()),
+        location: FlowErrorLocation::at_path(schema_label.clone())
+            .with_source_path(Some(schema_path)),
     })?;
-    load_with_schema_text(yaml, &schema_text, schema_label, source_label)
+    load_with_schema_text(
+        yaml,
+        &schema_text,
+        schema_label,
+        Some(schema_path),
+        source_label,
+        None,
+    )
 }
 
 pub(crate) fn load_with_schema_text(
     yaml: &str,
     schema_text: &str,
     schema_label: impl Into<String>,
+    schema_path: Option<&Path>,
     source_label: impl Into<String>,
+    source_path: Option<&Path>,
 ) -> Result<FlowDoc> {
     let schema_label = schema_label.into();
     let source_label = source_label.into();
     let v_yaml: serde_yaml_bw::Value =
         serde_yaml_bw::from_str(yaml).map_err(|e| FlowError::Yaml {
             message: e.to_string(),
-            location: yaml_error_location(&source_label, e.location()),
+            location: yaml_error_location(&source_label, source_path, e.location()),
         })?;
     let v_json: Value = serde_json::to_value(&v_yaml).map_err(|e| FlowError::Internal {
         message: format!("yaml->json: {e}"),
-        location: FlowErrorLocation::at_path(source_label.clone()),
+        location: FlowErrorLocation::at_path(source_label.clone()).with_source_path(source_path),
     })?;
-    validate_json(&v_json, schema_text, &schema_label, &source_label)?;
+    validate_json(
+        &v_json,
+        schema_text,
+        &schema_label,
+        schema_path,
+        &source_label,
+        source_path,
+    )?;
 
     let mut flow: FlowDoc = serde_yaml_bw::from_str(yaml).map_err(|e| FlowError::Yaml {
         message: e.to_string(),
-        location: yaml_error_location(&source_label, e.location()),
+        location: yaml_error_location(&source_label, source_path, e.location()),
     })?;
 
     let node_ids: Vec<String> = flow.nodes.keys().cloned().collect();
     for id in &node_ids {
         let node = flow.nodes.get_mut(id).ok_or_else(|| FlowError::Internal {
             message: format!("node '{id}' missing after load"),
-            location: node_location(&source_label, id),
+            location: node_location(&source_label, source_path, id),
         })?;
 
         let mut component_kv: Option<(String, Value)> = None;
@@ -121,7 +145,7 @@ pub(crate) fn load_with_schema_text(
             if component_kv.is_some() {
                 return Err(FlowError::NodeComponentShape {
                     node_id: id.clone(),
-                    location: node_location(&source_label, id),
+                    location: node_location(&source_label, source_path, id),
                 });
             }
             component_kv = Some((key.clone(), value.clone()));
@@ -130,13 +154,13 @@ pub(crate) fn load_with_schema_text(
         let (component_key, payload) =
             component_kv.ok_or_else(|| FlowError::NodeComponentShape {
                 node_id: id.clone(),
-                location: node_location(&source_label, id),
+                location: node_location(&source_label, source_path, id),
             })?;
         if !COMP_KEY_RE.is_match(&component_key) {
             return Err(FlowError::BadComponentKey {
                 component: component_key,
                 node_id: id.clone(),
-                location: node_location(&source_label, id),
+                location: node_location(&source_label, source_path, id),
             });
         }
 
@@ -145,7 +169,7 @@ pub(crate) fn load_with_schema_text(
         if let Some(value) = routing {
             node.routing = serde_json::from_value(value).map_err(|e| FlowError::Internal {
                 message: format!("routing decode in node '{id}': {e}"),
-                location: node_location(&source_label, id),
+                location: node_location(&source_label, source_path, id),
             })?;
         }
         node.raw = BTreeMap::new();
@@ -160,7 +184,7 @@ pub(crate) fn load_with_schema_text(
                 return Err(FlowError::MissingNode {
                     target: to.clone(),
                     node_id: from_id.clone(),
-                    location: routing_location(&source_label, from_id),
+                    location: routing_location(&source_label, source_path, from_id),
                 });
             }
         }
@@ -173,22 +197,37 @@ pub(crate) fn load_with_schema_text(
     Ok(flow)
 }
 
-fn node_location(source_label: &str, node_id: &str) -> FlowErrorLocation {
+fn node_location(
+    source_label: &str,
+    source_path: Option<&Path>,
+    node_id: &str,
+) -> FlowErrorLocation {
     FlowErrorLocation::at_path(format!("{source_label}::nodes.{node_id}"))
+        .with_source_path(source_path)
 }
 
-fn routing_location(source_label: &str, node_id: &str) -> FlowErrorLocation {
+fn routing_location(
+    source_label: &str,
+    source_path: Option<&Path>,
+    node_id: &str,
+) -> FlowErrorLocation {
     FlowErrorLocation::at_path(format!("{source_label}::nodes.{node_id}.routing"))
+        .with_source_path(source_path)
 }
 
-fn yaml_error_location(source_label: &str, loc: Option<YamlLocation>) -> FlowErrorLocation {
+fn yaml_error_location(
+    source_label: &str,
+    source_path: Option<&Path>,
+    loc: Option<YamlLocation>,
+) -> FlowErrorLocation {
     if let Some(loc) = loc {
         FlowErrorLocation::at_path_with_position(
             source_label.to_string(),
             Some(loc.line()),
             Some(loc.column()),
         )
+        .with_source_path(source_path)
     } else {
-        FlowErrorLocation::at_path(source_label.to_string())
+        FlowErrorLocation::at_path(source_label.to_string()).with_source_path(source_path)
     }
 }

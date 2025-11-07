@@ -1,6 +1,6 @@
 [package]
 name = "greentic-flow"
-version = "0.3.0"
+version = "0.3.2"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -15,7 +15,7 @@ toml = ["dep:toml"]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 greentic-interfaces = "0.4"
-greentic-types = { version = "0.2", features = ["telemetry-autoinit"] }
+greentic-types = { version = "0.3", features = ["telemetry-autoinit"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml_bw = "2"
 serde_json = "1"
@@ -27,6 +27,7 @@ lazy_static = "1"
 toml = { version = "0.9", optional = true }
 tracing = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+blake3 = "1"
 
 [dev-dependencies]
 assert_cmd = "2"

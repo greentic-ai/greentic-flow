@@ -2,10 +2,12 @@
 //! `greentic_types::telemetry::set_current_tenant_ctx` before executing flows
 //! (for example, prior to `FlowEngine::run` in the host runner).
 #![forbid(unsafe_code)]
+#![allow(clippy::result_large_err)]
 
-pub mod bundle;
 pub mod error;
+pub mod flow_bundle;
 pub mod ir;
+pub mod json_output;
 pub mod lint;
 pub mod loader;
 pub mod model;
@@ -13,7 +15,11 @@ pub mod registry;
 pub mod resolve;
 pub mod util;
 
-pub use bundle::{FlowBundle, FlowBundleVersion};
+pub use flow_bundle::{
+    ComponentPin, FlowBundle, NodeRef, blake3_hex, canonicalize_json, extract_component_pins,
+    load_and_validate_bundle, load_and_validate_bundle_with_ir,
+};
+pub use json_output::{JsonDiagnostic, LintJsonOutput, lint_to_stdout_json};
 
 use crate::{
     error::Result,
@@ -21,29 +27,6 @@ use crate::{
     model::FlowDoc,
 };
 use indexmap::IndexMap;
-
-const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
-const EMBEDDED_SCHEMA_LABEL: &str = "<embedded schema>";
-const INLINE_SOURCE_LABEL: &str = "<inline>";
-
-/// Load a flow document from YAML using the embedded schema and return a versioned bundle.
-pub fn load_and_validate(flow_yaml: &str) -> Result<FlowBundle> {
-    load_and_validate_with_source(flow_yaml, INLINE_SOURCE_LABEL)
-}
-
-/// Same as [`load_and_validate`] but lets callers label the source for diagnostics.
-pub fn load_and_validate_with_source(
-    flow_yaml: &str,
-    source_label: impl Into<String>,
-) -> Result<FlowBundle> {
-    let flow = loader::load_with_schema_text(
-        flow_yaml,
-        EMBEDDED_SCHEMA,
-        EMBEDDED_SCHEMA_LABEL.to_string(),
-        source_label,
-    )?;
-    Ok(FlowBundle::new(flow))
-}
 
 /// Convert a `FlowDoc` into its compact intermediate representation.
 pub fn to_ir(flow: FlowDoc) -> Result<FlowIR> {

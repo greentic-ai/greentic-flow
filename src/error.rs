@@ -1,23 +1,23 @@
-use std::fmt;
+use std::{fmt, path::PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowErrorLocation {
     pub path: Option<String>,
+    pub source_path: Option<PathBuf>,
     pub line: Option<usize>,
-    pub column: Option<usize>,
+    pub col: Option<usize>,
+    pub json_pointer: Option<String>,
 }
 
 impl FlowErrorLocation {
-    pub fn new<P: Into<Option<String>>>(
-        path: P,
-        line: Option<usize>,
-        column: Option<usize>,
-    ) -> Self {
+    pub fn new<P: Into<Option<String>>>(path: P, line: Option<usize>, col: Option<usize>) -> Self {
         FlowErrorLocation {
             path: path.into(),
             line,
-            column,
+            col,
+            source_path: None,
+            json_pointer: None,
         }
     }
 
@@ -28,20 +28,30 @@ impl FlowErrorLocation {
     pub fn at_path_with_position(
         path: impl Into<String>,
         line: Option<usize>,
-        column: Option<usize>,
+        col: Option<usize>,
     ) -> Self {
-        FlowErrorLocation::new(Some(path.into()), line, column)
+        FlowErrorLocation::new(Some(path.into()), line, col)
+    }
+
+    pub fn with_source_path(mut self, source_path: Option<&std::path::Path>) -> Self {
+        self.source_path = source_path.map(|p| p.to_path_buf());
+        self
+    }
+
+    pub fn with_json_pointer(mut self, pointer: Option<impl Into<String>>) -> Self {
+        self.json_pointer = pointer.map(|p| p.into());
+        self
     }
 
     pub fn describe(&self) -> Option<String> {
-        if self.path.is_none() && self.line.is_none() && self.column.is_none() {
+        if self.path.is_none() && self.line.is_none() && self.col.is_none() {
             return None;
         }
         let mut parts = String::new();
         if let Some(path) = &self.path {
             parts.push_str(path);
         }
-        match (self.line, self.column) {
+        match (self.line, self.col) {
             (Some(line), Some(column)) => {
                 if !parts.is_empty() {
                     parts.push(':');
@@ -68,17 +78,17 @@ impl FlowErrorLocation {
 
 impl fmt::Display for FlowErrorLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.path.is_none() && self.line.is_none() && self.column.is_none() {
+        if self.path.is_none() && self.line.is_none() && self.col.is_none() {
             return Ok(());
         }
         write!(f, " at ")?;
         if let Some(path) = &self.path {
             write!(f, "{path}")?;
-            if self.line.is_some() || self.column.is_some() {
+            if self.line.is_some() || self.col.is_some() {
                 write!(f, ":")?;
             }
         }
-        match (self.line, self.column) {
+        match (self.line, self.col) {
             (Some(line), Some(column)) => write!(f, "{line}:{column}")?,
             (Some(line), None) => write!(f, "{line}")?,
             (None, Some(column)) => write!(f, "{column}")?,
@@ -135,4 +145,5 @@ pub enum FlowError {
     },
 }
 
+#[allow(clippy::result_large_err)]
 pub type Result<T> = std::result::Result<T, FlowError>;
