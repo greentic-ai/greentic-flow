@@ -10,7 +10,7 @@ use greentic_flow::{
 use std::{
     ffi::OsStr,
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -272,7 +272,8 @@ fn run_json(
     };
 
     let ok = output.ok;
-    println!("{}", output.into_string());
+    let line = output.into_string();
+    write_stdout_line(&line)?;
     if ok {
         Ok(())
     } else {
@@ -286,4 +287,13 @@ fn read_stdin_flow() -> AnyResult<String> {
         .read_to_string(&mut buf)
         .context("failed to read flow YAML from stdin")?;
     Ok(buf)
+}
+
+fn write_stdout_line(line: &str) -> AnyResult<()> {
+    let mut stdout = io::stdout().lock();
+    match writeln!(stdout, "{}", line) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
