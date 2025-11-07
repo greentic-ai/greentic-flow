@@ -1,4 +1,4 @@
-use crate::error::{FlowError, Result};
+use crate::error::{FlowError, FlowErrorLocation, Result};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde_json::Value;
@@ -45,13 +45,15 @@ fn lookup(root: &Value, path: &str, loc: &str) -> Result<Value> {
     let mut current = root;
     for part in path.split('.') {
         current = match current {
-            Value::Object(map) => map.get(part).ok_or_else(|| {
-                FlowError::Internal(format!("Unknown parameters.{path} at {loc}"))
+            Value::Object(map) => map.get(part).ok_or_else(|| FlowError::Internal {
+                message: format!("Unknown parameters.{path} at {loc}"),
+                location: FlowErrorLocation::at_path(loc.to_string()),
             })?,
             _ => {
-                return Err(FlowError::Internal(format!(
-                    "parameters.{path} at {loc} not an object"
-                )));
+                return Err(FlowError::Internal {
+                    message: format!("parameters.{path} at {loc} not an object"),
+                    location: FlowErrorLocation::at_path(loc.to_string()),
+                });
             }
         };
     }

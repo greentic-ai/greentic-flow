@@ -1,47 +1,115 @@
 use crate::{
-    error::{FlowError, Result},
+    error::{FlowError, FlowErrorLocation, Result, SchemaErrorDetail},
     model::FlowDoc,
     util::COMP_KEY_RE,
 };
 use jsonschema::Draft;
 use serde_json::Value;
+use serde_yaml_bw::Location as YamlLocation;
 use std::{collections::BTreeMap, path::Path};
 
-fn validate_json(doc: &Value, schema_path: &Path) -> Result<()> {
-    let schema_text = std::fs::read_to_string(schema_path)
-        .map_err(|e| FlowError::Internal(format!("schema read: {e}")))?;
-    let schema: Value = serde_json::from_str(&schema_text)
-        .map_err(|e| FlowError::Internal(format!("schema parse: {e}")))?;
+const INLINE_SOURCE: &str = "<inline>";
+
+fn validate_json(
+    doc: &Value,
+    schema_text: &str,
+    schema_label: &str,
+    source_label: &str,
+) -> Result<()> {
+    let schema: Value = serde_json::from_str(schema_text).map_err(|e| FlowError::Internal {
+        message: format!("schema parse for {schema_label}: {e}"),
+        location: FlowErrorLocation::at_path(schema_label.to_string()),
+    })?;
     let validator = jsonschema::options()
         .with_draft(Draft::Draft202012)
         .build(&schema)
-        .map_err(|e| FlowError::Internal(format!("schema compile: {e}")))?;
-    let errors: Vec<String> = validator
+        .map_err(|e| FlowError::Internal {
+            message: format!("schema compile for {schema_label}: {e}"),
+            location: FlowErrorLocation::at_path(schema_label.to_string()),
+        })?;
+    let details: Vec<SchemaErrorDetail> = validator
         .iter_errors(doc)
-        .map(|e| format!("at {}: {}", e.instance_path, e))
+        .map(|e| {
+            let pointer = e.instance_path.to_string();
+            let pointer = if pointer.is_empty() {
+                "/".to_string()
+            } else {
+                pointer
+            };
+            SchemaErrorDetail {
+                message: e.to_string(),
+                location: FlowErrorLocation::at_path(format!("{source_label}{pointer}")),
+            }
+        })
         .collect();
-    if !errors.is_empty() {
-        return Err(FlowError::Schema(errors.join("\n")));
+    if !details.is_empty() {
+        let message = details
+            .iter()
+            .map(|detail| {
+                let where_str = detail
+                    .location
+                    .describe()
+                    .unwrap_or_else(|| source_label.to_string());
+                format!("{where_str}: {}", detail.message)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(FlowError::Schema {
+            message,
+            details,
+            location: FlowErrorLocation::at_path(source_label.to_string()),
+        });
     }
     Ok(())
 }
 
 pub fn load_ygtc_from_str(yaml: &str, schema_path: &Path) -> Result<FlowDoc> {
-    let v_yaml: serde_yaml_bw::Value = serde_yaml_bw::from_str(yaml)
-        .map_err(|e| FlowError::Yaml("string".into(), e.to_string()))?;
-    let v_json: Value = serde_json::to_value(&v_yaml)
-        .map_err(|e| FlowError::Internal(format!("yaml->json: {e}")))?;
-    validate_json(&v_json, schema_path)?;
+    load_ygtc_from_str_with_source(yaml, schema_path, INLINE_SOURCE)
+}
 
-    let mut flow: FlowDoc = serde_yaml_bw::from_str(yaml)
-        .map_err(|e| FlowError::Yaml("string".into(), e.to_string()))?;
+pub fn load_ygtc_from_str_with_source(
+    yaml: &str,
+    schema_path: &Path,
+    source_label: impl Into<String>,
+) -> Result<FlowDoc> {
+    let schema_label = schema_path.display().to_string();
+    let schema_text = std::fs::read_to_string(schema_path).map_err(|e| FlowError::Internal {
+        message: format!("schema read from {schema_label}: {e}"),
+        location: FlowErrorLocation::at_path(schema_label.clone()),
+    })?;
+    load_with_schema_text(yaml, &schema_text, schema_label, source_label)
+}
+
+pub(crate) fn load_with_schema_text(
+    yaml: &str,
+    schema_text: &str,
+    schema_label: impl Into<String>,
+    source_label: impl Into<String>,
+) -> Result<FlowDoc> {
+    let schema_label = schema_label.into();
+    let source_label = source_label.into();
+    let v_yaml: serde_yaml_bw::Value =
+        serde_yaml_bw::from_str(yaml).map_err(|e| FlowError::Yaml {
+            message: e.to_string(),
+            location: yaml_error_location(&source_label, e.location()),
+        })?;
+    let v_json: Value = serde_json::to_value(&v_yaml).map_err(|e| FlowError::Internal {
+        message: format!("yaml->json: {e}"),
+        location: FlowErrorLocation::at_path(source_label.clone()),
+    })?;
+    validate_json(&v_json, schema_text, &schema_label, &source_label)?;
+
+    let mut flow: FlowDoc = serde_yaml_bw::from_str(yaml).map_err(|e| FlowError::Yaml {
+        message: e.to_string(),
+        location: yaml_error_location(&source_label, e.location()),
+    })?;
 
     let node_ids: Vec<String> = flow.nodes.keys().cloned().collect();
     for id in &node_ids {
-        let node = flow
-            .nodes
-            .get_mut(id)
-            .ok_or_else(|| FlowError::Internal(format!("node '{id}' missing after load")))?;
+        let node = flow.nodes.get_mut(id).ok_or_else(|| FlowError::Internal {
+            message: format!("node '{id}' missing after load"),
+            location: node_location(&source_label, id),
+        })?;
 
         let mut component_kv: Option<(String, Value)> = None;
         let mut routing: Option<Value> = None;
@@ -51,22 +119,34 @@ pub fn load_ygtc_from_str(yaml: &str, schema_path: &Path) -> Result<FlowDoc> {
                 continue;
             }
             if component_kv.is_some() {
-                return Err(FlowError::NodeComponentShape(id.clone()));
+                return Err(FlowError::NodeComponentShape {
+                    node_id: id.clone(),
+                    location: node_location(&source_label, id),
+                });
             }
             component_kv = Some((key.clone(), value.clone()));
         }
 
         let (component_key, payload) =
-            component_kv.ok_or_else(|| FlowError::NodeComponentShape(id.clone()))?;
+            component_kv.ok_or_else(|| FlowError::NodeComponentShape {
+                node_id: id.clone(),
+                location: node_location(&source_label, id),
+            })?;
         if !COMP_KEY_RE.is_match(&component_key) {
-            return Err(FlowError::BadComponentKey(component_key, id.clone()));
+            return Err(FlowError::BadComponentKey {
+                component: component_key,
+                node_id: id.clone(),
+                location: node_location(&source_label, id),
+            });
         }
 
         node.component = component_key;
         node.payload = payload;
         if let Some(value) = routing {
-            node.routing = serde_json::from_value(value)
-                .map_err(|e| FlowError::Internal(format!("routing decode in node '{id}': {e}")))?;
+            node.routing = serde_json::from_value(value).map_err(|e| FlowError::Internal {
+                message: format!("routing decode in node '{id}': {e}"),
+                location: node_location(&source_label, id),
+            })?;
         }
         node.raw = BTreeMap::new();
     }
@@ -77,7 +157,11 @@ pub fn load_ygtc_from_str(yaml: &str, schema_path: &Path) -> Result<FlowDoc> {
                 && to != "out"
                 && !flow.nodes.contains_key(to)
             {
-                return Err(FlowError::MissingNode(to.clone(), from_id.clone()));
+                return Err(FlowError::MissingNode {
+                    target: to.clone(),
+                    node_id: from_id.clone(),
+                    location: routing_location(&source_label, from_id),
+                });
             }
         }
     }
@@ -87,4 +171,24 @@ pub fn load_ygtc_from_str(yaml: &str, schema_path: &Path) -> Result<FlowDoc> {
     }
 
     Ok(flow)
+}
+
+fn node_location(source_label: &str, node_id: &str) -> FlowErrorLocation {
+    FlowErrorLocation::at_path(format!("{source_label}::nodes.{node_id}"))
+}
+
+fn routing_location(source_label: &str, node_id: &str) -> FlowErrorLocation {
+    FlowErrorLocation::at_path(format!("{source_label}::nodes.{node_id}.routing"))
+}
+
+fn yaml_error_location(source_label: &str, loc: Option<YamlLocation>) -> FlowErrorLocation {
+    if let Some(loc) = loc {
+        FlowErrorLocation::at_path_with_position(
+            source_label.to_string(),
+            Some(loc.line()),
+            Some(loc.column()),
+        )
+    } else {
+        FlowErrorLocation::at_path(source_label.to_string())
+    }
 }

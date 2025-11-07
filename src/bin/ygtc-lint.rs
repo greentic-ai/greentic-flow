@@ -2,7 +2,7 @@ use anyhow::{Context, Result as AnyResult};
 use clap::Parser;
 use greentic_flow::{
     lint::{lint_builtin_rules, lint_with_registry},
-    loader::load_ygtc_from_str,
+    loader::load_ygtc_from_str_with_source,
     registry::AdapterCatalog,
     to_ir,
 };
@@ -89,7 +89,7 @@ fn lint_file(
     let content =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
 
-    match load_ygtc_from_str(&content, schema) {
+    match load_ygtc_from_str_with_source(&content, schema, path.display().to_string()) {
         Ok(flow) => match to_ir(flow) {
             Ok(ir) => {
                 let errors = if let Some(cat) = registry {

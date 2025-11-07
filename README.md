@@ -4,16 +4,18 @@ Generic schema, loader, and intermediate representation for YGTC flows composed 
 
 ## Quickstart
 ```rust
-use greentic_flow::{loader::load_ygtc_from_str, resolve::resolve_parameters, to_ir};
-use std::path::Path;
+use greentic_flow::{load_and_validate, resolve::resolve_parameters, to_ir};
 
 let yaml = std::fs::read_to_string("fixtures/weather_bot.ygtc")?;
-let flow = load_ygtc_from_str(&yaml, Path::new("schemas/ygtc.flow.schema.json"))?;
-let ir = to_ir(flow)?;
+let bundle = load_and_validate(&yaml)?;
+let ir = to_ir(bundle.into_flow())?;
 let node = ir.nodes.get("forecast_weather").unwrap();
 let resolved = resolve_parameters(&node.payload_expr, &ir.parameters, "nodes.forecast_weather")?;
 # Ok::<_, greentic_flow::error::FlowError>(())
 ```
+
+`loader::load_ygtc_from_str_with_source` remains available if you need to validate
+against a custom schema and keep diagnostic paths tied to the original file.
 
 ## Design Highlights
 - JSON Schema (`schemas/ygtc.flow.schema.json`) enforces exactly one component key per node plus optional routing metadata.
