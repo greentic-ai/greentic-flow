@@ -224,13 +224,11 @@ fn run_json(
     schema_path: &Path,
     registry: Option<&AdapterCatalog>,
 ) -> AnyResult<()> {
-    let mut stdin_virtual_path: Option<PathBuf> = None;
     let (content, source_display, source_path) = if let Some(stdin_flow) = stdin_content {
-        stdin_virtual_path = Some(PathBuf::from("<stdin>"));
         (
             stdin_flow,
             "<stdin>".to_string(),
-            stdin_virtual_path.as_deref(),
+            Some(Path::new("<stdin>")),
         )
     } else {
         if targets.len() != 1 {
