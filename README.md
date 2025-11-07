@@ -67,14 +67,14 @@ For machine-readable CI, use `--json`; the command exits non-zero on any error a
 prints the validated bundle plus diagnostics:
 
 ```
-cargo run --bin ygtc-lint -- --json tests/data/flow_ok.ygtc
+cargo run --quiet --bin ygtc-lint -- --json tests/data/flow_ok.ygtc
 # { "ok": true, "bundle": { "id": "flow_ok", ... } }
 ```
 
 Pipelines can also stream flows via stdin:
 
 ```
-cat tests/data/flow_ok.ygtc | cargo run --bin ygtc-lint -- --json --stdin
+cat tests/data/flow_ok.ygtc | cargo run --quiet --bin ygtc-lint -- --json --stdin
 ```
 
 And in CI you can assert the BLAKE3 hash is present:
