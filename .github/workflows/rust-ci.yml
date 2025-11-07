@@ -51,11 +51,7 @@ jobs:
       - name: ygtc-lint --json smoke
         run: |
           cargo build --quiet --bin ygtc-lint
-          ./target/debug/ygtc-lint --json tests/data/flow_ok.ygtc | python - <<'PY'
-          import json, sys
-          data = json.load(sys.stdin)
-          assert data.get("ok") is True, data
-          PY
+          ./target/debug/ygtc-lint --json tests/data/flow_ok.ygtc | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data'
       - name: verify published schema $id
         run: |
           url="https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json"
