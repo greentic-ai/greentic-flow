@@ -10,8 +10,7 @@ use std::path::Path;
 
 const INLINE_SOURCE_LABEL: &str = "<inline>";
 const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
-const DEFAULT_SCHEMA_LABEL: &str =
-    "https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json";
+const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greentic-ai/greentic-flow/main/schemas/ygtc.flow.schema.json";
 
 pub type NodeId = String;
 

@@ -8,6 +8,8 @@ set -euo pipefail
 LOCAL_CHECK_ONLINE=${LOCAL_CHECK_ONLINE:-0}
 LOCAL_CHECK_STRICT=${LOCAL_CHECK_STRICT:-0}
 LOCAL_CHECK_VERBOSE=${LOCAL_CHECK_VERBOSE:-0}
+LOCAL_CHECK_ALLOW_SKIP=${LOCAL_CHECK_ALLOW_SKIP:-0}
+SKIPPED_REQUIRED=0
 
 if [[ "${LOCAL_CHECK_VERBOSE}" == "1" ]]; then
   set -x
@@ -24,6 +26,10 @@ step() {
 
 skip_step() {
   local reason=$1
+  local required=${2:-0}
+  if [[ "${required}" == "1" ]]; then
+    SKIPPED_REQUIRED=1
+  fi
   if [[ "${LOCAL_CHECK_STRICT}" == "1" ]]; then
     echo "[FAIL] ${reason}"
     exit 1
@@ -77,9 +83,9 @@ fi
 
 step "ygtc-lint --json smoke test"
 if ! need python3; then
-  skip_step "python3 required for smoke test"
+  skip_step "python3 required for smoke test" 1
 elif ! need cargo && [[ ! -x target/debug/ygtc-lint ]]; then
-  skip_step "cargo required to build ygtc-lint"
+  skip_step "cargo required to build ygtc-lint" 1
 else
   if [[ ! -x target/debug/ygtc-lint ]]; then
     cargo build --quiet --bin ygtc-lint
@@ -89,13 +95,13 @@ fi
 
 step "Verify published schema \$id"
 if [[ "${LOCAL_CHECK_ONLINE}" != "1" ]]; then
-  skip_step "online schema check disabled (set LOCAL_CHECK_ONLINE=1)"
+  skip_step "online schema check disabled (set LOCAL_CHECK_ONLINE=1)" 0
 elif ! need curl; then
-  skip_step "curl required for schema check"
+  skip_step "curl required for schema check" 1
 elif ! need python3; then
-  skip_step "python3 required for schema check"
+  skip_step "python3 required for schema check" 1
 else
-  url="https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json"
+  url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/main/schemas/ygtc.flow.schema.json"
   tmp_schema="$(mktemp)"
   curl -sSf "${url}" -o "${tmp_schema}"
   python3 - <<PY
@@ -109,6 +115,12 @@ if local.get("$id") != expected:
     raise SystemExit(f"Local schema \$id mismatch: {local.get('$id')}")
 PY
   rm -f "${tmp_schema}"
+fi
+
+if [[ "${SKIPPED_REQUIRED}" == "1" && "${LOCAL_CHECK_ALLOW_SKIP}" != "1" ]]; then
+  echo ""
+  echo "[FAIL] Required CI steps were skipped. Re-run with LOCAL_CHECK_ONLINE=1 and all tools installed, or set LOCAL_CHECK_ALLOW_SKIP=1 to override."
+  exit 2
 fi
 
 echo ""

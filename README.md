@@ -55,8 +55,9 @@ LOCAL_CHECK_ONLINE=1 ci/local_check.sh
 Toggles:
 
 - `LOCAL_CHECK_ONLINE=1` — enable networked checks (schema fetch, etc.)
-- `LOCAL_CHECK_STRICT=1` — treat missing tools as failures
+- `LOCAL_CHECK_STRICT=1` — treat missing tools as immediate failures (default already fails required skips unless `LOCAL_CHECK_ALLOW_SKIP=1`)
 - `LOCAL_CHECK_VERBOSE=1` — echo each command
+- `LOCAL_CHECK_ALLOW_SKIP=1` — allow required CI steps to be skipped (not recommended)
 
 ## CLI
 
@@ -98,7 +99,7 @@ ygtc-lint --json --stdin < flow.ygtc | jq -e '.ok and .hash_blake3 != null'
 The CLI recursively walks any directories provided, only inspecting files with a `.ygtc` extension. Schema validation always runs; adapter checks are additive when a registry is supplied.
 
 The shared flow schema is published from this repository at
-`https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json`
+`https://raw.githubusercontent.com/greentic-ai/greentic-flow/main/schemas/ygtc.flow.schema.json`
 and matches the `$id` embedded in `schemas/ygtc.flow.schema.json`.
 
 ## Environment
