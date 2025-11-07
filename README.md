@@ -99,7 +99,7 @@ ygtc-lint --json --stdin < flow.ygtc | jq -e '.ok and .hash_blake3 != null'
 The CLI recursively walks any directories provided, only inspecting files with a `.ygtc` extension. Schema validation always runs; adapter checks are additive when a registry is supplied.
 
 The shared flow schema is published from this repository at
-`https://raw.githubusercontent.com/greentic-ai/greentic-flow/main/schemas/ygtc.flow.schema.json`
+`https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json`
 and matches the `$id` embedded in `schemas/ygtc.flow.schema.json`.
 
 ## Environment

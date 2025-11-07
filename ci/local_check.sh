@@ -101,20 +101,20 @@ elif ! need curl; then
 elif ! need python3; then
   skip_step "python3 required for schema check" 1
 else
-  url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/main/schemas/ygtc.flow.schema.json"
+  url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
   tmp_schema="$(mktemp)"
   if ! curl -sSf "${url}" -o "${tmp_schema}"; then
     skip_step "schema fetch failed (check network or set LOCAL_CHECK_ALLOW_SKIP=1)" 1
   else
-  python3 - <<PY
-import json, pathlib, sys
-published = json.load(open("${tmp_schema}"))
+  TMP_SCHEMA="${tmp_schema}" python3 - <<'PY'
+import json, os, sys
+published = json.load(open(os.environ["TMP_SCHEMA"]))
 local = json.load(open("schemas/ygtc.flow.schema.json"))
-expected = "https://raw.githubusercontent.com/greentic-ai/greentic-flow/main/schemas/ygtc.flow.schema.json"
+expected = "https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
 if published.get("$id") != expected:
-    raise SystemExit(f"Published schema \$id mismatch: {published.get('$id')}")
+    raise SystemExit(f"Published schema $id mismatch: {published.get('$id')}")
 if local.get("$id") != expected:
-    raise SystemExit(f"Local schema \$id mismatch: {local.get('$id')}")
+    raise SystemExit(f"Local schema $id mismatch: {local.get('$id')}")
 PY
   rm -f "${tmp_schema}"
   fi

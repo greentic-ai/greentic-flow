@@ -54,7 +54,7 @@ jobs:
           ./target/debug/ygtc-lint --json tests/data/flow_ok.ygtc | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data'
       - name: verify published schema $id
         run: |
-          url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/main/schemas/ygtc.flow.schema.json"
+          url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
           curl -sSf "$url" -o /tmp/published-schema.json
           python - <<'PY'
           import json, pathlib
