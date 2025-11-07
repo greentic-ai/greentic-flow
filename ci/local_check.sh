@@ -103,18 +103,21 @@ elif ! need python3; then
 else
   url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/main/schemas/ygtc.flow.schema.json"
   tmp_schema="$(mktemp)"
-  curl -sSf "${url}" -o "${tmp_schema}"
+  if ! curl -sSf "${url}" -o "${tmp_schema}"; then
+    skip_step "schema fetch failed (check network or set LOCAL_CHECK_ALLOW_SKIP=1)" 1
+  else
   python3 - <<PY
 import json, pathlib, sys
 published = json.load(open("${tmp_schema}"))
 local = json.load(open("schemas/ygtc.flow.schema.json"))
-expected = "https://greentic-ai.github.io/greentic-flow/schemas/ygtc.flow.schema.json"
+expected = "https://raw.githubusercontent.com/greentic-ai/greentic-flow/main/schemas/ygtc.flow.schema.json"
 if published.get("$id") != expected:
     raise SystemExit(f"Published schema \$id mismatch: {published.get('$id')}")
 if local.get("$id") != expected:
     raise SystemExit(f"Local schema \$id mismatch: {local.get('$id')}")
 PY
   rm -f "${tmp_schema}"
+  fi
 fi
 
 if [[ "${SKIPPED_REQUIRED}" == "1" && "${LOCAL_CHECK_ALLOW_SKIP}" != "1" ]]; then
