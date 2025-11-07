@@ -50,7 +50,8 @@ jobs:
         run: cargo test --all-features
       - name: ygtc-lint --json smoke
         run: |
-          cargo run --quiet --bin ygtc-lint -- --json tests/data/flow_ok.ygtc | python - <<'PY'
+          cargo build --quiet --bin ygtc-lint
+          ./target/debug/ygtc-lint --json tests/data/flow_ok.ygtc | python - <<'PY'
           import json, sys
           data = json.load(sys.stdin)
           assert data.get("ok") is True, data
