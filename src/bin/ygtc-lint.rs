@@ -291,7 +291,7 @@ fn read_stdin_flow() -> AnyResult<String> {
 
 fn write_stdout_line(line: &str) -> AnyResult<()> {
     let mut stdout = io::stdout().lock();
-    match writeln!(stdout, "{}", line) {
+    match writeln!(stdout, "{line}") {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         Err(e) => Err(e.into()),
