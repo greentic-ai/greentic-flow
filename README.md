@@ -61,6 +61,33 @@ Toggles:
 
 ## CLI
 
+### Flow scaffolding
+
+`greentic-flow` ships with a lightweight scaffolder for new `.ygtc` files:
+
+```
+cargo run --bin greentic-flow -- new flows/demo.ygtc --kind messaging
+```
+
+Flags of note:
+
+- `--kind messaging|events|deployment` controls the template. `--kind deployment`
+  is just sugar for `type: events` plus a first node that assumes access to the
+  `greentic:deploy-plan@1.0.0` world.
+- `--deployment` aliases `--kind deployment`.
+- `--pack-manifest <path>` (or a local `manifest.yaml` if no flag is provided)
+  lets the tool peek at pack metadata. It will:
+  - default `--kind` to `deployment` when the pack declares `kind: deployment`,
+  - append the new flow to the manifest's `flows:` array (path stored relative
+    to the manifest directory), and
+  - emit informational hints (for example, when a deployment pack scaffolds a
+    messaging flow anyway).
+- `--id`, `--description`, and `--force` cover the usual ergonomics.
+
+Running the command writes a ready-to-edit `.ygtc` file and reports any hints.
+
+### Flow linting
+
 Run `cargo run --bin ygtc-lint -- <paths>` to validate flows. Example:
 
 ```
@@ -101,6 +128,28 @@ The CLI recursively walks any directories provided, only inspecting files with a
 The shared flow schema is published from this repository at
 `https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json`
 and matches the `$id` embedded in `schemas/ygtc.flow.schema.json`.
+
+## Deployment flows (events-based)
+
+Deployment flows are standard `type: events` flows that operate on a
+`DeploymentPlan` provided by hosting tooling. Use
+
+```
+greentic-flow new flows/deploy_stack.ygtc --kind deployment
+```
+
+to scaffold one quickly. The template creates a first node that highlights the
+`greentic:deploy-plan@1.0.0` world so the component can read the plan and emit
+status updates. Node IDs and component kinds remain opaque strings; nothing in
+this crate hard-codes provider-specific behaviour.
+
+See [`docs/deployment-flows.md`](docs/deployment-flows.md) for a deeper dive
+covering plan access, CLI helpers, and authoring guidelines.
+
+A pack may declare `kind: deployment` in its manifest to signal that most of its
+flows are deployment-oriented. The scaffolder simply treats that as a hint and
+emits an informational message if you add a messaging flow to such a pack. Mixed
+packs remain perfectly valid.
 
 ## Environment
 - `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`) targets your collector.
