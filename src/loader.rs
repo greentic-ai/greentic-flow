@@ -34,7 +34,7 @@ fn validate_json(
     let details: Vec<SchemaErrorDetail> = validator
         .iter_errors(doc)
         .map(|e| {
-            let pointer = e.instance_path.to_string();
+            let pointer = e.instance_path().to_string();
             let pointer = if pointer.is_empty() {
                 "/".to_string()
             } else {
