@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::result_large_err)]
 
+pub mod config_flow;
 pub mod error;
 pub mod flow_bundle;
 pub mod ir;
@@ -11,6 +12,7 @@ pub mod json_output;
 pub mod lint;
 pub mod loader;
 pub mod model;
+pub mod path_safety;
 pub mod registry;
 pub mod resolve;
 pub mod util;

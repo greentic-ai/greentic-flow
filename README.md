@@ -129,6 +129,18 @@ The shared flow schema is published from this repository at
 `https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json`
 and matches the `$id` embedded in `schemas/ygtc.flow.schema.json`.
 
+## Config flows (convention)
+
+A config flow is a regular flow whose kind may be `component-config` (or any other string) and whose final node emits a payload shaped as:
+
+```json
+{ "node_id": "some_step", "node": { /* full node object with one component key plus routing */ } }
+```
+
+Tools like `greentic-dev` can execute these flows and splice the emitted node into another flow. The engine itself does not special-case config flows: node components such as `questions` (prompting for values) and `template` (rendering a JSON template) are handled like any other component.
+
+For lightweight automation in this crate, `config_flow::run_config_flow` can execute simple config flows by seeding answers for `questions` fields and rendering the final `template` payload into `{ node_id, node }`.
+
 ## Deployment flows (events-based)
 
 Deployment flows are standard `type: events` flows that operate on a

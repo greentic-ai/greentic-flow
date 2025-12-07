@@ -125,7 +125,7 @@ pub enum FlowError {
         location: FlowErrorLocation,
     },
     #[error(
-        "Invalid component key '{component}' in node '{node_id}' (must match ^[A-Za-z][\\w.-]*\\.[\\w.-]+$){location}"
+        "Invalid component key '{component}' in node '{node_id}' (expected namespace.adapter.operation or builtin like 'questions'/'template'){location}"
     )]
     BadComponentKey {
         component: String,

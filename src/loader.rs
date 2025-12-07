@@ -1,7 +1,8 @@
 use crate::{
     error::{FlowError, FlowErrorLocation, Result, SchemaErrorDetail},
     model::FlowDoc,
-    util::COMP_KEY_RE,
+    path_safety::normalize_under_root,
+    util::is_valid_component_key,
 };
 use jsonschema::Draft;
 use serde_json::Value;
@@ -79,17 +80,29 @@ pub fn load_ygtc_from_str_with_source(
     schema_path: &Path,
     source_label: impl Into<String>,
 ) -> Result<FlowDoc> {
-    let schema_label = schema_path.display().to_string();
-    let schema_text = std::fs::read_to_string(schema_path).map_err(|e| FlowError::Internal {
-        message: format!("schema read from {schema_label}: {e}"),
-        location: FlowErrorLocation::at_path(schema_label.clone())
+    let schema_root = std::env::current_dir().map_err(|e| FlowError::Internal {
+        message: format!("resolve schema root: {e}"),
+        location: FlowErrorLocation::at_path(schema_path.display().to_string())
             .with_source_path(Some(schema_path)),
     })?;
+    let safe_schema_path =
+        normalize_under_root(&schema_root, schema_path).map_err(|e| FlowError::Internal {
+            message: format!("schema path validation for {}: {e}", schema_path.display()),
+            location: FlowErrorLocation::at_path(schema_path.display().to_string())
+                .with_source_path(Some(schema_path)),
+        })?;
+    let schema_label = safe_schema_path.display().to_string();
+    let schema_text =
+        std::fs::read_to_string(&safe_schema_path).map_err(|e| FlowError::Internal {
+            message: format!("schema read from {schema_label}: {e}"),
+            location: FlowErrorLocation::at_path(schema_label.clone())
+                .with_source_path(Some(&safe_schema_path)),
+        })?;
     load_with_schema_text(
         yaml,
         &schema_text,
         schema_label,
-        Some(schema_path),
+        Some(&safe_schema_path),
         source_label,
         None,
     )
@@ -156,7 +169,7 @@ pub(crate) fn load_with_schema_text(
                 node_id: id.clone(),
                 location: node_location(&source_label, source_path, id),
             })?;
-        if !COMP_KEY_RE.is_match(&component_key) {
+        if !is_valid_component_key(&component_key) {
             return Err(FlowError::BadComponentKey {
                 component: component_key,
                 node_id: id.clone(),

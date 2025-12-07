@@ -9,8 +9,14 @@
     "title": { "type": "string" },
     "description": { "type": "string" },
     "type": {
-      "type": "string",
-      "enum": ["messaging", "webhook", "timer", "websocket", "pubsub"]
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": ["messaging", "webhook", "timer", "websocket", "pubsub"]
+        },
+        { "type": "string" }
+      ],
+      "description": "Flow kind; well-known values include 'messaging' and 'events', but custom strings (e.g., 'component-config') are allowed."
     },
     "start": { "type": "string" },
     "parameters": { "type": "object", "additionalProperties": true },
@@ -25,6 +31,39 @@
           "minProperties": 1,
           "maxProperties": 2,
           "properties": {
+            "questions": {
+              "type": "object",
+              "properties": {
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": { "type": "string", "minLength": 1 },
+                      "prompt": { "type": "string" },
+                      "type": {
+                        "type": "string",
+                        "enum": ["string", "number", "boolean", "enum"]
+                      },
+                      "default": {},
+                      "options": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                      }
+                    },
+                    "required": ["id", "prompt", "type"],
+                    "additionalProperties": true
+                  }
+                }
+              },
+              "required": ["fields"],
+              "additionalProperties": true,
+              "description": "Prompt for configuration values; answers are stored under state.<id> by the runtime."
+            },
+            "template": {
+              "type": "string",
+              "description": "Template string rendered by the runtime into the final payload."
+            },
             "routing": {
               "type": "array",
               "items": {
@@ -39,7 +78,6 @@
           },
           "patternProperties": {
             "^[a-zA-Z][\\w.-]*\\.[\\w.-]+$": {
-            "type": "object",
             "description": "Opaque component payload – validated by the component itself. Adapter-backed components should follow the <namespace>.<adapter>.<operation> shape.",
               "additionalProperties": true
             }
