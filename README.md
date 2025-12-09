@@ -4,23 +4,24 @@ Generic schema, loader, and intermediate representation for YGTC flows composed 
 
 ## Quickstart
 ```rust
-use greentic_flow::{load_and_validate_bundle, resolve::resolve_parameters, loader, to_ir};
+use greentic_flow::{compile_flow, load_and_validate_bundle, resolve::resolve_parameters, loader};
+use greentic_types::NodeId;
 
 let yaml = std::fs::read_to_string("fixtures/weather_bot.ygtc")?;
 let bundle = load_and_validate_bundle(&yaml, None)?;
 println!("Bundle entry node: {}", bundle.entry);
 
-let flow = loader::load_ygtc_from_str(&yaml, std::path::Path::new("schemas/ygtc.flow.schema.json"))?;
-let ir = to_ir(flow)?;
-let node = ir.nodes.get("forecast_weather").unwrap();
-let resolved = resolve_parameters(&node.payload_expr, &ir.parameters, "nodes.forecast_weather")?;
+let doc = loader::load_ygtc_from_str(&yaml)?;
+let flow = compile_flow(doc)?;
+let node = flow.nodes.get(&NodeId::new("forecast_weather")?).unwrap();
+let resolved = resolve_parameters(&node.input.mapping, &flow.metadata.extra, "nodes.forecast_weather")?;
 # Ok::<_, greentic_flow::error::FlowError>(())
 ```
 
 ## Design Highlights
 - JSON Schema (`schemas/ygtc.flow.schema.json`) enforces exactly one component key per node plus optional routing metadata.
 - Loader converts YAML documents to `FlowDoc`, validates against the schema, extracts component metadata, and performs basic graph checks.
-- IR (`FlowIR`) keeps nodes generic and serde-friendly so runtimes can post-process component payloads while exposing `NodeKind` classification for adapters.
+- Compiler emits canonical `greentic_types::Flow` nodes so runtimes can post-process component payloads while exposing `NodeKind` classification for adapters.
 - `NodeKind::Adapter` recognises node component strings shaped as `<namespace>.<adapter>.<operation>` and keeps the trailing segments joined so nested operations are preserved.
 - `resolve::resolve_parameters` pre-resolves only `parameters.*` references, leaving other runtime bindings intact.
 - `start` is optional; if omitted and an `in` node exists, the loader defaults `start` to `in`.

@@ -1,28 +1,36 @@
-use greentic_flow::{config_flow::run_config_flow, loader::load_ygtc_from_str, to_ir};
+use greentic_flow::{compile_flow, config_flow::run_config_flow, loader::load_ygtc_from_str};
+use greentic_types::NodeId;
 use serde_json::{Map, Value, json};
-use std::path::Path;
 
 #[test]
 fn config_flow_loads_and_emits_contract_payload() {
     let yaml = std::fs::read_to_string("tests/data/config_flow.ygtc").unwrap();
-    let flow = load_ygtc_from_str(&yaml, Path::new("schemas/ygtc.flow.schema.json")).unwrap();
-    assert_eq!(flow.flow_type, "component-config");
+    let doc = load_ygtc_from_str(&yaml).unwrap();
+    assert_eq!(doc.flow_type, "component-config");
 
-    let ir = to_ir(flow).unwrap();
-    let ask = ir.nodes.get("ask_config").expect("ask_config node");
-    assert_eq!(ask.component, "questions");
+    let flow = compile_flow(doc).unwrap();
+    let ask = flow
+        .nodes
+        .get(&NodeId::new("ask_config").unwrap())
+        .expect("ask_config node");
+    assert_eq!(ask.component.id.as_str(), "questions");
     assert!(
-        ask.payload_expr
+        ask.input
+            .mapping
             .pointer("/fields")
             .and_then(Value::as_array)
             .map(|fields| !fields.is_empty())
             .unwrap_or(false)
     );
 
-    let emit = ir.nodes.get("emit_config").expect("emit_config node");
-    assert_eq!(emit.component, "template");
+    let emit = flow
+        .nodes
+        .get(&NodeId::new("emit_config").unwrap())
+        .expect("emit_config node");
+    assert_eq!(emit.component.id.as_str(), "template");
     let template_str = emit
-        .payload_expr
+        .input
+        .mapping
         .as_str()
         .expect("template payload is a string");
     let rendered: Value =
@@ -46,8 +54,12 @@ fn config_flow_harness_substitutes_state() {
     answers.insert("welcome_template".to_string(), json!("Howdy"));
     answers.insert("temperature".to_string(), json!(0.5));
 
-    let output =
-        run_config_flow(&yaml, Path::new("schemas/ygtc.flow.schema.json"), &answers).unwrap();
+    let output = run_config_flow(
+        &yaml,
+        std::path::Path::new("schemas/ygtc.flow.schema.json"),
+        &answers,
+    )
+    .unwrap();
 
     assert_eq!(output.node_id, "qa_step");
     let qa = output.node.get("qa").and_then(Value::as_object).unwrap();

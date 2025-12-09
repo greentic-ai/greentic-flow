@@ -117,6 +117,18 @@ pub enum FlowError {
         details: Vec<SchemaErrorDetail>,
         location: FlowErrorLocation,
     },
+    #[error("Unknown flow type '{flow_type}'{location}")]
+    UnknownFlowType {
+        flow_type: String,
+        location: FlowErrorLocation,
+    },
+    #[error("Invalid identifier for {kind} '{value}'{location}: {detail}")]
+    InvalidIdentifier {
+        kind: &'static str,
+        value: String,
+        detail: String,
+        location: FlowErrorLocation,
+    },
     #[error(
         "Node '{node_id}' must contain exactly one component key like 'qa.process' plus optional 'routing'{location}"
     )]
@@ -130,6 +142,12 @@ pub enum FlowError {
     BadComponentKey {
         component: String,
         node_id: String,
+        location: FlowErrorLocation,
+    },
+    #[error("Invalid routing block in node '{node_id}'{location}: {message}")]
+    Routing {
+        node_id: String,
+        message: String,
         location: FlowErrorLocation,
     },
     #[error("Missing node '{target}' referenced in routing from '{node_id}'{location}")]

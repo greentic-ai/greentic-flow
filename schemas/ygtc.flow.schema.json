@@ -8,6 +8,10 @@
     "id": { "type": "string", "minLength": 1 },
     "title": { "type": "string" },
     "description": { "type": "string" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "type": {
       "anyOf": [
         {
@@ -20,6 +24,11 @@
     },
     "start": { "type": "string" },
     "parameters": { "type": "object", "additionalProperties": true },
+    "entrypoints": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Optional entrypoints keyed by name (e.g., default, telegram, http:/path)."
+    },
     "nodes": {
       "type": "object",
       "minProperties": 1,
@@ -29,7 +38,7 @@
           "type": "object",
           "description": "A node must have exactly one component key like messaging.telegram.sendMessage (namespace.adapter.operation) plus optional routing.",
           "minProperties": 1,
-          "maxProperties": 2,
+          "maxProperties": 6,
           "properties": {
             "questions": {
               "type": "object",
@@ -71,10 +80,31 @@
                 "additionalProperties": false,
                 "properties": {
                   "to": { "type": "string" },
-                  "out": { "type": "boolean" }
+                  "out": { "type": "boolean" },
+                  "status": { "type": "string" },
+                  "reply": { "type": "boolean" }
                 }
               }
-            }
+            },
+            "output": {
+              "type": "object",
+              "additionalProperties": true,
+              "description": "Optional output mapping configuration."
+            },
+            "telemetry": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "span_name": { "type": "string" },
+                "attributes": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                },
+                "sampling": { "type": "string" }
+              }
+            },
+            "pack_alias": { "type": "string" },
+            "operation": { "type": "string" }
           },
           "patternProperties": {
             "^[a-zA-Z][\\w.-]*\\.[\\w.-]+$": {

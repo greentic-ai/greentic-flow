@@ -19,43 +19,262 @@ pub mod util;
 
 pub use flow_bundle::{
     ComponentPin, FlowBundle, NodeRef, blake3_hex, canonicalize_json, extract_component_pins,
-    load_and_validate_bundle, load_and_validate_bundle_with_ir,
+    load_and_validate_bundle, load_and_validate_bundle_with_flow,
 };
 pub use json_output::{JsonDiagnostic, LintJsonOutput, lint_to_stdout_json};
 
-use crate::{
-    error::Result,
-    ir::{FlowIR, NodeIR, RouteIR},
-    model::FlowDoc,
+use crate::{error::Result, model::FlowDoc};
+use greentic_types::{
+    ComponentId, Flow, FlowComponentRef, FlowId, FlowKind, FlowMetadata, InputMapping, Node,
+    NodeId, OutputMapping, Routing, TelemetryHints, flow::FlowHasher,
 };
 use indexmap::IndexMap;
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
-/// Convert a `FlowDoc` into its compact intermediate representation.
-pub fn to_ir(flow: FlowDoc) -> Result<FlowIR> {
-    let mut nodes: IndexMap<String, NodeIR> = IndexMap::new();
-    for (id, node) in flow.nodes {
-        nodes.insert(
-            id,
-            NodeIR {
-                component: node.component,
-                payload_expr: node.payload,
-                routes: node
-                    .routing
-                    .into_iter()
-                    .map(|route| RouteIR {
-                        to: route.to,
-                        out: route.out.unwrap_or(false),
-                    })
-                    .collect(),
-            },
-        );
+/// Map a YAML flow type string to [`FlowKind`].
+pub fn map_flow_type(flow_type: &str) -> Result<FlowKind> {
+    match flow_type {
+        "messaging" => Ok(FlowKind::Messaging),
+        "event" | "events" => Ok(FlowKind::Event),
+        "component-config" => Ok(FlowKind::ComponentConfig),
+        "job" => Ok(FlowKind::Job),
+        "http" => Ok(FlowKind::Http),
+        other => Err(crate::error::FlowError::UnknownFlowType {
+            flow_type: other.to_string(),
+            location: crate::error::FlowErrorLocation::at_path("type"),
+        }),
+    }
+}
+
+/// Compile a validated [`FlowDoc`] into the canonical [`Flow`] model.
+pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
+    let kind = map_flow_type(&doc.flow_type)?;
+    let mut entrypoints = doc.entrypoints.clone();
+    if let Some(entry) = resolve_entry(&doc) {
+        entrypoints
+            .entry("default".to_string())
+            .or_insert_with(|| Value::String(entry));
     }
 
-    Ok(FlowIR {
-        id: flow.id,
-        flow_type: flow.flow_type,
-        start: flow.start,
-        parameters: flow.parameters,
+    let mut nodes: IndexMap<NodeId, Node, FlowHasher> = IndexMap::default();
+    for (node_id_str, node_doc) in doc.nodes.iter() {
+        let node_id = NodeId::new(node_id_str.as_str()).map_err(|e| {
+            crate::error::FlowError::InvalidIdentifier {
+                kind: "node",
+                value: node_id_str.clone(),
+                detail: e.to_string(),
+                location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
+            }
+        })?;
+        let component_id = ComponentId::new(node_doc.component.as_str()).map_err(|e| {
+            crate::error::FlowError::InvalidIdentifier {
+                kind: "component",
+                value: node_doc.component.clone(),
+                detail: e.to_string(),
+                location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
+            }
+        })?;
+        let routing = compile_routing(&node_doc.routing, &doc.nodes, node_id_str)?;
+        let telemetry = node_doc
+            .telemetry
+            .as_ref()
+            .map(|t| TelemetryHints {
+                span_name: t.span_name.clone(),
+                attributes: t.attributes.clone(),
+                sampling: t.sampling.clone(),
+            })
+            .unwrap_or_default();
+        let node = Node {
+            id: node_id.clone(),
+            component: FlowComponentRef {
+                id: component_id,
+                pack_alias: node_doc.pack_alias.clone(),
+                operation: node_doc.operation.clone(),
+            },
+            input: InputMapping {
+                mapping: node_doc.payload.clone(),
+            },
+            output: OutputMapping {
+                mapping: node_doc
+                    .output
+                    .clone()
+                    .unwrap_or_else(|| Value::Object(Default::default())),
+            },
+            routing,
+            telemetry,
+        };
+        nodes.insert(node_id, node);
+    }
+
+    let flow_id =
+        FlowId::new(doc.id.as_str()).map_err(|e| crate::error::FlowError::InvalidIdentifier {
+            kind: "flow",
+            value: doc.id.clone(),
+            detail: e.to_string(),
+            location: crate::error::FlowErrorLocation::at_path("id"),
+        })?;
+
+    Ok(Flow {
+        schema_version: "flow-v1".to_string(),
+        id: flow_id,
+        kind,
+        entrypoints,
         nodes,
+        metadata: FlowMetadata {
+            title: doc.title,
+            description: doc.description,
+            tags: doc.tags.into_iter().collect::<BTreeSet<_>>(),
+            extra: doc.parameters,
+        },
     })
+}
+
+/// Compile YGTC YAML text into [`Flow`].
+pub fn compile_ygtc_str(src: &str) -> Result<Flow> {
+    let doc = loader::load_ygtc_from_str(src)?;
+    compile_flow(doc)
+}
+
+/// Compile a YGTC file into [`Flow`].
+pub fn compile_ygtc_file(path: &Path) -> Result<Flow> {
+    let doc = loader::load_ygtc_from_path(path)?;
+    compile_flow(doc)
+}
+
+fn compile_routing(
+    raw: &Value,
+    nodes: &BTreeMap<String, crate::model::NodeDoc>,
+    node_id: &str,
+) -> Result<Routing> {
+    #[derive(serde::Deserialize)]
+    struct RouteDoc {
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        out: Option<bool>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        reply: Option<bool>,
+    }
+
+    let routes: Vec<RouteDoc> = if raw.is_null() {
+        Vec::new()
+    } else {
+        serde_json::from_value(raw.clone()).map_err(|e| crate::error::FlowError::Routing {
+            node_id: node_id.to_string(),
+            message: e.to_string(),
+            location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id}.routing")),
+        })?
+    };
+
+    if routes.len() == 1 {
+        let route = &routes[0];
+        let is_out = route.out.unwrap_or(false);
+        if route.reply.unwrap_or(false) {
+            return Ok(Routing::Reply);
+        }
+        if let Some(to) = &route.to {
+            if to == "out" || is_out {
+                return Ok(Routing::End);
+            }
+            if !nodes.contains_key(to) {
+                return Err(crate::error::FlowError::MissingNode {
+                    target: to.clone(),
+                    node_id: node_id.to_string(),
+                    location: crate::error::FlowErrorLocation::at_path(format!(
+                        "nodes.{node_id}.routing"
+                    )),
+                });
+            }
+            return Ok(Routing::Next {
+                node_id: NodeId::new(to.as_str()).map_err(|e| {
+                    crate::error::FlowError::InvalidIdentifier {
+                        kind: "node",
+                        value: to.clone(),
+                        detail: e.to_string(),
+                        location: crate::error::FlowErrorLocation::at_path(format!(
+                            "nodes.{node_id}.routing"
+                        )),
+                    }
+                })?,
+            });
+        }
+        if is_out {
+            return Ok(Routing::End);
+        }
+        if route.status.is_some() {
+            // single status route without a destination is ambiguous
+            return Ok(Routing::Custom(raw.clone()));
+        }
+    }
+
+    if routes.is_empty() {
+        return Ok(Routing::End);
+    }
+
+    // Attempt to build a Branch when multiple status routes are present.
+    if routes.len() >= 2 {
+        use std::collections::BTreeMap;
+        let mut on_status: BTreeMap<String, NodeId> = BTreeMap::new();
+        let mut default: Option<NodeId> = None;
+        let mut any_status = false;
+        for route in &routes {
+            if route.reply.unwrap_or(false) || route.out.unwrap_or(false) {
+                return Ok(Routing::Custom(raw.clone()));
+            }
+            let to = match &route.to {
+                Some(t) => t,
+                None => return Ok(Routing::Custom(raw.clone())),
+            };
+            if !nodes.contains_key(to) {
+                return Err(crate::error::FlowError::MissingNode {
+                    target: to.clone(),
+                    node_id: node_id.to_string(),
+                    location: crate::error::FlowErrorLocation::at_path(format!(
+                        "nodes.{node_id}.routing"
+                    )),
+                });
+            }
+            let to_id = NodeId::new(to.as_str()).map_err(|e| {
+                crate::error::FlowError::InvalidIdentifier {
+                    kind: "node",
+                    value: to.clone(),
+                    detail: e.to_string(),
+                    location: crate::error::FlowErrorLocation::at_path(format!(
+                        "nodes.{node_id}.routing"
+                    )),
+                }
+            })?;
+            if let Some(status) = &route.status {
+                any_status = true;
+                on_status.insert(status.clone(), to_id);
+            } else {
+                default = Some(to_id);
+            }
+        }
+        if any_status {
+            return Ok(Routing::Branch { on_status, default });
+        }
+        if let Some(default) = default {
+            return Ok(Routing::Branch {
+                on_status,
+                default: Some(default),
+            });
+        }
+    }
+
+    Ok(Routing::Custom(raw.clone()))
+}
+
+fn resolve_entry(doc: &FlowDoc) -> Option<String> {
+    if let Some(start) = &doc.start {
+        return Some(start.clone());
+    }
+    if doc.nodes.contains_key("in") {
+        return Some("in".to_string());
+    }
+    doc.nodes.keys().next().cloned()
 }

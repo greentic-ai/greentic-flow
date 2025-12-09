@@ -1,6 +1,6 @@
 use crate::{
     error::{FlowError, FlowErrorLocation},
-    flow_bundle::{FlowBundle, load_and_validate_bundle_with_ir},
+    flow_bundle::{FlowBundle, load_and_validate_bundle_with_flow},
     lint::lint_builtin_rules,
 };
 use serde::Serialize;
@@ -115,8 +115,11 @@ pub fn flow_error_to_reports(err: FlowError) -> Vec<JsonDiagnostic> {
             }
         }
         FlowError::Yaml { location, .. }
+        | FlowError::UnknownFlowType { location, .. }
+        | FlowError::InvalidIdentifier { location, .. }
         | FlowError::NodeComponentShape { location, .. }
         | FlowError::BadComponentKey { location, .. }
+        | FlowError::Routing { location, .. }
         | FlowError::MissingNode { location, .. }
         | FlowError::Internal { location, .. } => {
             vec![JsonDiagnostic::from_location(display_message, location)]
@@ -126,9 +129,9 @@ pub fn flow_error_to_reports(err: FlowError) -> Vec<JsonDiagnostic> {
 
 /// Produce the same JSON emitted by `ygtc-lint --json` for builtin linting.
 pub fn lint_to_stdout_json(ygtc: &str) -> String {
-    match load_and_validate_bundle_with_ir(ygtc, None) {
-        Ok((bundle, ir)) => {
-            let lint_errors = lint_builtin_rules(&ir);
+    match load_and_validate_bundle_with_flow(ygtc, None) {
+        Ok((bundle, flow)) => {
+            let lint_errors = lint_builtin_rules(&flow);
             if lint_errors.is_empty() {
                 LintJsonOutput::success(bundle).into_string()
             } else {

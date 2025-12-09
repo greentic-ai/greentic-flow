@@ -1,8 +1,8 @@
 use greentic_flow::{
-    canonicalize_json, extract_component_pins, load_and_validate_bundle,
-    loader::load_ygtc_from_str, to_ir,
+    canonicalize_json, compile_flow, extract_component_pins, load_and_validate_bundle,
+    loader::load_ygtc_from_str,
 };
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 
 #[test]
 fn bundle_fields_are_stable() {
@@ -32,9 +32,9 @@ fn extract_component_pins_matches_bundle_nodes() {
     let yaml = std::fs::read_to_string("fixtures/weather_bot.ygtc").unwrap();
     let bundle = load_and_validate_bundle(&yaml, None).unwrap();
 
-    let flow = load_ygtc_from_str(&yaml, Path::new("schemas/ygtc.flow.schema.json")).unwrap();
-    let ir = to_ir(flow).unwrap();
-    let pins = extract_component_pins(&ir);
+    let doc = load_ygtc_from_str(&yaml).unwrap();
+    let flow = compile_flow(doc).unwrap();
+    let pins = extract_component_pins(&flow);
 
     let map: HashMap<_, _> = pins
         .into_iter()

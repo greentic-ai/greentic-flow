@@ -5,9 +5,9 @@ use regex::Regex;
 use serde_json::{Map, Value};
 
 use crate::{
+    compile_flow,
     error::{FlowError, FlowErrorLocation, Result},
-    loader::load_ygtc_from_str,
-    to_ir,
+    loader::load_ygtc_from_str_with_schema,
 };
 
 /// Result of executing a config flow: a node identifier and the node object to insert.
@@ -30,26 +30,36 @@ pub fn run_config_flow(
     schema_path: &Path,
     answers: &Map<String, Value>,
 ) -> Result<ConfigFlowOutput> {
-    let flow = load_ygtc_from_str(yaml, schema_path)?;
-    let ir = to_ir(flow)?;
-
+    let doc = load_ygtc_from_str_with_schema(yaml, schema_path)?;
+    let flow = compile_flow(doc.clone())?;
     let mut state = answers.clone();
 
-    let mut current = resolve_entry(&ir);
+    let mut current = resolve_entry(&doc);
     let mut visited = 0usize;
-    while visited < ir.nodes.len().saturating_add(4) {
+    while visited < flow.nodes.len().saturating_add(4) {
         visited += 1;
-        let node = ir.nodes.get(&current).ok_or_else(|| FlowError::Internal {
-            message: format!("node '{current}' missing during config flow execution"),
-            location: FlowErrorLocation::at_path(format!("nodes.{current}")),
+        let node_id = greentic_types::NodeId::new(current.as_str()).map_err(|e| {
+            FlowError::InvalidIdentifier {
+                kind: "node",
+                value: current.clone(),
+                detail: e.to_string(),
+                location: FlowErrorLocation::at_path(format!("nodes.{current}")),
+            }
         })?;
+        let node = flow
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| FlowError::Internal {
+                message: format!("node '{current}' missing during config flow execution"),
+                location: FlowErrorLocation::at_path(format!("nodes.{current}")),
+            })?;
 
-        match node.component.as_str() {
+        match node.component.id.as_str() {
             "questions" => {
-                apply_questions(&node.payload_expr, &mut state)?;
+                apply_questions(&node.input.mapping, &mut state)?;
             }
             "template" => {
-                let payload = render_template(&node.payload_expr, &state)?;
+                let payload = render_template(&node.input.mapping, &state)?;
                 return extract_config_output(payload);
             }
             other => {
@@ -60,20 +70,18 @@ pub fn run_config_flow(
             }
         }
 
-        // Move to the next routed node if available.
-        let mut next = None;
-        for route in &node.routes {
-            if let Some(to) = &route.to {
-                next = Some(to.clone());
-                break;
-            }
-        }
-        match next {
-            Some(id) => current = id,
-            None => {
+        current = match &node.routing {
+            greentic_types::Routing::Next { node_id } => node_id.as_str().to_string(),
+            greentic_types::Routing::End | greentic_types::Routing::Reply => {
                 return Err(FlowError::Internal {
                     message: "config flow terminated without reaching template node".to_string(),
                     location: FlowErrorLocation::at_path("nodes".to_string()),
+                });
+            }
+            greentic_types::Routing::Branch { .. } | greentic_types::Routing::Custom(_) => {
+                return Err(FlowError::Internal {
+                    message: "unsupported routing shape in config flow".to_string(),
+                    location: FlowErrorLocation::at_path(format!("nodes.{current}.routing")),
                 });
             }
         }
@@ -85,14 +93,14 @@ pub fn run_config_flow(
     })
 }
 
-fn resolve_entry(ir: &crate::ir::FlowIR) -> String {
-    if let Some(start) = &ir.start {
+fn resolve_entry(doc: &crate::model::FlowDoc) -> String {
+    if let Some(start) = &doc.start {
         return start.clone();
     }
-    if ir.nodes.contains_key("in") {
+    if doc.nodes.contains_key("in") {
         return "in".to_string();
     }
-    ir.nodes
+    doc.nodes
         .keys()
         .next()
         .cloned()

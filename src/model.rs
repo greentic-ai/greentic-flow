@@ -6,6 +6,14 @@ fn default_parameters() -> Value {
     Value::Object(Default::default())
 }
 
+fn default_entrypoints() -> BTreeMap<String, Value> {
+    BTreeMap::new()
+}
+
+fn default_routing() -> Value {
+    Value::Array(Vec::new())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowDoc {
     pub id: String,
@@ -19,25 +27,39 @@ pub struct FlowDoc {
     pub start: Option<String>,
     #[serde(default = "default_parameters")]
     pub parameters: Value,
-    pub nodes: BTreeMap<String, Node>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_entrypoints")]
+    pub entrypoints: BTreeMap<String, Value>,
+    pub nodes: BTreeMap<String, NodeDoc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Node {
+pub struct NodeDoc {
     #[serde(skip_serializing, skip_deserializing, default)]
     pub component: String,
     #[serde(skip_serializing, skip_deserializing, default)]
+    pub pack_alias: Option<String>,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    pub operation: Option<String>,
+    #[serde(skip_serializing, skip_deserializing, default)]
     pub payload: Value,
-    #[serde(default)]
-    pub routing: Vec<Route>,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    pub output: Option<Value>,
+    #[serde(default = "default_routing")]
+    pub routing: Value,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    pub telemetry: Option<TelemetryDoc>,
     #[serde(flatten, default)]
     pub raw: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Route {
+pub struct TelemetryDoc {
     #[serde(default)]
-    pub to: Option<String>,
+    pub span_name: Option<String>,
     #[serde(default)]
-    pub out: Option<bool>,
+    pub attributes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub sampling: Option<String>,
 }

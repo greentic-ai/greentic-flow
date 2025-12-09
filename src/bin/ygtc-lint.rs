@@ -198,7 +198,7 @@ fn lint_flow(
     schema_path: &Path,
     registry: Option<&AdapterCatalog>,
 ) -> Result<LintResult, FlowError> {
-    let (bundle, ir) = load_and_validate_bundle_with_schema_text(
+    let (bundle, flow) = load_and_validate_bundle_with_schema_text(
         content,
         schema_text,
         schema_label.to_string(),
@@ -206,9 +206,9 @@ fn lint_flow(
         source_path,
     )?;
     let lint_errors = if let Some(cat) = registry {
-        lint_with_registry(&ir, cat)
+        lint_with_registry(&flow, cat)
     } else {
-        lint_builtin_rules(&ir)
+        lint_builtin_rules(&flow)
     };
     Ok(LintResult {
         bundle,

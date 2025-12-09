@@ -1,9 +1,9 @@
 use crate::{
     error::{FlowError, FlowErrorLocation, Result},
-    ir::FlowIR,
-    loader, to_ir,
+    loader,
 };
 use blake3::Hasher;
+use greentic_types::Flow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
@@ -64,14 +64,14 @@ pub fn blake3_hex(bytes: impl AsRef<[u8]>) -> String {
 }
 
 /// Extract component pins from the IR.
-pub fn extract_component_pins(ir: &FlowIR) -> Vec<(NodeId, ComponentPin)> {
-    ir.nodes
+pub fn extract_component_pins(flow: &Flow) -> Vec<(NodeId, ComponentPin)> {
+    flow.nodes
         .iter()
         .map(|(node_id, node)| {
             (
-                node_id.clone(),
+                node_id.to_string(),
                 ComponentPin {
-                    name: node.component.clone(),
+                    name: node.component.id.as_str().to_string(),
                     version_req: "*".to_string(),
                 },
             )
@@ -91,10 +91,10 @@ pub fn load_and_validate_bundle(yaml: &str, source: Option<&Path>) -> Result<Flo
     .map(|(bundle, _)| bundle)
 }
 
-pub fn load_and_validate_bundle_with_ir(
+pub fn load_and_validate_bundle_with_flow(
     yaml: &str,
     source: Option<&Path>,
-) -> Result<(FlowBundle, FlowIR)> {
+) -> Result<(FlowBundle, Flow)> {
     load_and_validate_bundle_with_schema_text(
         yaml,
         EMBEDDED_SCHEMA,
@@ -110,13 +110,13 @@ pub fn load_and_validate_bundle_with_schema_text(
     schema_label: impl Into<String>,
     schema_path: Option<&Path>,
     source: Option<&Path>,
-) -> Result<(FlowBundle, FlowIR)> {
+) -> Result<(FlowBundle, Flow)> {
     let schema_label = schema_label.into();
     let source_label = source
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| INLINE_SOURCE_LABEL.to_string());
 
-    let flow = loader::load_with_schema_text(
+    let flow_doc = loader::load_with_schema_text(
         yaml,
         schema_text,
         schema_label,
@@ -125,7 +125,7 @@ pub fn load_and_validate_bundle_with_schema_text(
         source,
     )?;
 
-    let flow_json = serde_json::to_value(&flow).map_err(|e| FlowError::Internal {
+    let flow_json = serde_json::to_value(&flow_doc).map_err(|e| FlowError::Internal {
         message: format!("flow serialization: {e}"),
         location: FlowErrorLocation::at_path(source_label.clone()).with_source_path(source),
     })?;
@@ -136,20 +136,21 @@ pub fn load_and_validate_bundle_with_schema_text(
     })?;
     let hash_blake3 = blake3_hex(&json_bytes);
 
-    let ir = to_ir(flow)?;
-    let bundle = build_bundle_from_parts(&ir, yaml, canonical_json, hash_blake3);
+    let flow = crate::compile_flow(flow_doc.clone())?;
+    let bundle = build_bundle_from_parts(&flow_doc, &flow, yaml, canonical_json, hash_blake3);
 
-    Ok((bundle, ir))
+    Ok((bundle, flow))
 }
 
 fn build_bundle_from_parts(
-    ir: &FlowIR,
+    doc: &crate::model::FlowDoc,
+    flow: &Flow,
     yaml: &str,
     canonical_json: Value,
     hash_blake3: String,
 ) -> FlowBundle {
-    let entry = resolve_entry(ir);
-    let nodes = extract_component_pins(ir)
+    let entry = resolve_entry(doc);
+    let nodes = extract_component_pins(flow)
         .into_iter()
         .map(|(node_id, component)| NodeRef {
             node_id,
@@ -159,8 +160,8 @@ fn build_bundle_from_parts(
         .collect();
 
     FlowBundle {
-        id: ir.id.clone(),
-        kind: ir.flow_type.clone(),
+        id: doc.id.clone(),
+        kind: doc.flow_type.clone(),
         entry,
         yaml: yaml.to_string(),
         json: canonical_json,
@@ -169,12 +170,12 @@ fn build_bundle_from_parts(
     }
 }
 
-fn resolve_entry(ir: &FlowIR) -> String {
-    if let Some(entry) = &ir.start {
+fn resolve_entry(doc: &crate::model::FlowDoc) -> String {
+    if let Some(entry) = &doc.start {
         return entry.clone();
     }
-    if ir.nodes.contains_key("in") {
+    if doc.nodes.contains_key("in") {
         return "in".to_string();
     }
-    ir.nodes.keys().next().cloned().unwrap_or_default()
+    doc.nodes.keys().next().cloned().unwrap_or_default()
 }
