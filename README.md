@@ -130,6 +130,11 @@ The shared flow schema is published from this repository at
 `https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json`
 and matches the `$id` embedded in `schemas/ygtc.flow.schema.json`.
 
+## Secrets workflow
+- `.ygtc` flows do not embed secret requirements or values.
+- Secret requirements are emitted by components/packs and surfaced by tooling such as `greentic-secrets init --pack <pack>`.
+- Runtimes and preflight tooling should rely on the aggregated pack metadata (and the secrets-store interface) rather than extending the flow schema.
+
 ## Config flows (convention)
 
 A config flow is a regular flow whose kind may be `component-config` (or any other string) and whose final node emits a payload shaped as:
@@ -173,6 +178,7 @@ packs remain perfectly valid.
 - Keep shared primitives flowing through `greentic-types` and `greentic-interfaces`.
 - Prefer zero-copy patterns and stay within safe Rust (`#![forbid(unsafe_code)]` is enabled).
 - Update the adapter registry fixtures under `tests/data/` when new adapters or operations are introduced.
+- Dependabot auto-merge is enabled for Cargo updates; repository settings must allow auto-merge and branch protections should list the required checks to gate merges.
 
 ## Releases & Publishing
 - Crate versions are sourced directly from each crate's `Cargo.toml`.

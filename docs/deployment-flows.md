@@ -58,6 +58,8 @@ expected to focus on events flows.
   other node.
 - Let components handle provider specifics: the flow only orchestrates logic and
   routing.
+- Secrets are not declared in flows; packs aggregate `secret_requirements` and
+  should be satisfied via `greentic-secrets init --pack <pack>`.
 - Capture IaC output paths via component config or pack metadata; the flow itself
   does not embed filesystem layout.
 
