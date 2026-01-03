@@ -321,7 +321,7 @@ fn routing_location(
         .with_source_path(source_path)
 }
 
-fn yaml_error_location(
+pub(crate) fn yaml_error_location(
     source_label: &str,
     source_path: Option<&Path>,
     loc: Option<YamlLocation>,

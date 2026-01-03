@@ -15,6 +15,7 @@ pub mod model;
 pub mod path_safety;
 pub mod registry;
 pub mod resolve;
+pub mod splice;
 pub mod util;
 
 pub use flow_bundle::{
@@ -22,6 +23,7 @@ pub use flow_bundle::{
     load_and_validate_bundle, load_and_validate_bundle_with_flow,
 };
 pub use json_output::{JsonDiagnostic, LintJsonOutput, lint_to_stdout_json};
+pub use splice::{NEXT_NODE_PLACEHOLDER, splice_node_after};
 
 use crate::{error::Result, model::FlowDoc};
 use greentic_types::{
