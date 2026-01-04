@@ -44,7 +44,7 @@ fn config_flow_loads_and_emits_contract_payload() {
         .get("node")
         .and_then(Value::as_object)
         .expect("node object");
-    assert!(node.contains_key("qa"));
+    assert!(node.contains_key("qa.process"));
 }
 
 #[test]
@@ -62,7 +62,11 @@ fn config_flow_harness_substitutes_state() {
     .unwrap();
 
     assert_eq!(output.node_id, "qa_step");
-    let qa = output.node.get("qa").and_then(Value::as_object).unwrap();
+    let qa = output
+        .node
+        .get("qa.process")
+        .and_then(Value::as_object)
+        .unwrap();
     assert_eq!(qa.get("welcome_template"), Some(&json!("Howdy")));
     assert_eq!(qa.get("temperature"), Some(&json!(0.5)));
 }

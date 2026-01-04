@@ -9,6 +9,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use greentic_flow::{
+    add_step::{
+        AddStepSpec, apply_and_validate,
+        modes::{AddStepModeInput, materialize_node},
+        plan_add_step,
+    },
+    component_catalog::ManifestCatalog,
+    flow_ir::FlowIr,
+    loader::load_ygtc_from_path,
+};
 #[derive(Parser, Debug)]
 #[command(name = "greentic-flow", about = "Flow scaffolding helpers")]
 struct Cli {
@@ -20,6 +30,8 @@ struct Cli {
 enum Commands {
     /// Create a new flow skeleton at the given path.
     New(NewArgs),
+    /// Insert a step after an anchor node.
+    AddStep(AddStepArgs),
 }
 
 #[derive(Args, Debug)]
@@ -103,6 +115,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::New(args) => handle_new(args),
+        Commands::AddStep(args) => handle_add_step(args),
     }
 }
 
@@ -210,6 +223,163 @@ fn render_flow_yaml(id: &str, description: &str, kind: FlowKind) -> Result<Strin
         yaml.push('\n');
     }
     Ok(yaml)
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum AddStepMode {
+    Default,
+    Config,
+}
+
+#[derive(Args, Debug)]
+struct AddStepArgs {
+    /// Path to the flow file to modify.
+    #[arg(long = "flow")]
+    flow_path: PathBuf,
+    /// Optional anchor node id; defaults to entrypoint or first node.
+    #[arg(long = "after")]
+    after: Option<String>,
+    /// How to source the node to insert.
+    #[arg(long = "mode", value_enum)]
+    mode: AddStepMode,
+    /// Component id (default mode).
+    #[arg(long = "component")]
+    component_id: Option<String>,
+    /// Optional pack alias for the new node.
+    #[arg(long = "pack-alias")]
+    pack_alias: Option<String>,
+    /// Optional operation for the new node.
+    #[arg(long = "operation")]
+    operation: Option<String>,
+    /// Payload JSON for the new node (default mode).
+    #[arg(long = "payload", default_value = "{}")]
+    payload: String,
+    /// Optional routing JSON for the new node (default mode).
+    #[arg(long = "routing")]
+    routing: Option<String>,
+    /// Config flow file to execute (config mode).
+    #[arg(long = "config-flow")]
+    config_flow: Option<PathBuf>,
+    /// Answers JSON for config mode.
+    #[arg(long = "answers")]
+    answers: Option<String>,
+    /// Answers file (JSON) for config mode.
+    #[arg(long = "answers-file")]
+    answers_file: Option<PathBuf>,
+    /// Allow cycles/back-edges during insertion.
+    #[arg(long = "allow-cycles")]
+    allow_cycles: bool,
+    /// Write back to the flow file instead of stdout.
+    #[arg(long = "write")]
+    write: bool,
+    /// Validate only without writing output.
+    #[arg(long = "validate-only")]
+    validate_only: bool,
+    /// Optional component manifest paths for catalog validation.
+    #[arg(long = "manifest")]
+    manifests: Vec<PathBuf>,
+    /// Optional explicit node id hint.
+    #[arg(long = "node-id")]
+    node_id: Option<String>,
+}
+
+fn handle_add_step(args: AddStepArgs) -> Result<()> {
+    let doc = load_ygtc_from_path(&args.flow_path)?;
+    let flow_ir = FlowIr::from_doc(doc)?;
+
+    let catalog = ManifestCatalog::load_from_paths(&args.manifests);
+
+    let mode_input = match args.mode {
+        AddStepMode::Default => {
+            let component_id = args
+                .component_id
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--component is required in default mode"))?;
+            let payload_json: serde_json::Value =
+                serde_json::from_str(&args.payload).context("parse --payload as JSON")?;
+            let routing_json = if let Some(r) = args.routing.as_ref() {
+                Some(serde_json::from_str(r).context("parse --routing as JSON array of routes")?)
+            } else {
+                None
+            };
+            AddStepModeInput::Default {
+                component_id,
+                pack_alias: args.pack_alias.clone(),
+                operation: args.operation.clone(),
+                payload: payload_json,
+                routing: routing_json,
+            }
+        }
+        AddStepMode::Config => {
+            let config_path = args
+                .config_flow
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--config-flow is required in config mode"))?;
+            let config_flow = fs::read_to_string(&config_path)
+                .with_context(|| format!("read config flow {}", config_path.display()))?;
+            let mut answers = serde_json::Map::new();
+            if let Some(a) = args.answers {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&a).context("parse --answers JSON")?;
+                if let Some(obj) = parsed.as_object() {
+                    answers.extend(obj.clone());
+                }
+            }
+            if let Some(file) = args.answers_file {
+                let text = fs::read_to_string(&file)
+                    .with_context(|| format!("read {}", file.display()))?;
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text).context("parse answers file as JSON")?;
+                if let Some(obj) = parsed.as_object() {
+                    answers.extend(obj.clone());
+                }
+            }
+            AddStepModeInput::Config {
+                config_flow,
+                schema_path: config_path.into_boxed_path(),
+                answers,
+            }
+        }
+    };
+
+    let (hint, node_value) = materialize_node(mode_input, &catalog)?;
+
+    let spec = AddStepSpec {
+        after: args.after.clone(),
+        node_id_hint: args.node_id.or(hint),
+        node: node_value,
+        allow_cycles: args.allow_cycles,
+    };
+
+    let plan = plan_add_step(&flow_ir, spec, &catalog)
+        .map_err(|diags| anyhow::anyhow!("planning failed: {:?}", diags))?;
+    let updated = apply_and_validate(&flow_ir, plan, &catalog, args.allow_cycles)?;
+    let updated_doc = updated.to_doc()?;
+    let mut output = serde_yaml_bw::to_string(&updated_doc)?;
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    if args.validate_only {
+        println!("add-step validation succeeded");
+        return Ok(());
+    }
+
+    if args.write {
+        let tmp_path = args.flow_path.with_extension("ygtc.tmp");
+        fs::write(&tmp_path, &output).with_context(|| format!("write {}", tmp_path.display()))?;
+        fs::rename(&tmp_path, &args.flow_path)
+            .with_context(|| format!("replace {}", args.flow_path.display()))?;
+        println!(
+            "Inserted node after '{}' and wrote {}",
+            args.after.unwrap_or_else(|| "<default anchor>".to_string()),
+            args.flow_path.display()
+        );
+    } else {
+        print!("{output}");
+    }
+
+    Ok(())
 }
 
 fn messaging_nodes() -> IndexMap<String, NodeTemplate> {

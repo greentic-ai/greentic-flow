@@ -5,6 +5,7 @@ use regex::Regex;
 use serde_json::{Map, Value};
 
 use crate::{
+    add_step::normalize::normalize_node_map,
     compile_flow,
     error::{FlowError, FlowErrorLocation, Result},
     loader::load_ygtc_from_str_with_schema,
@@ -206,72 +207,21 @@ fn extract_config_output(value: Value) -> Result<ConfigFlowOutput> {
 }
 
 fn normalize_node_shape(node: Value) -> Result<Value> {
-    let mut node_map = node
-        .as_object()
-        .cloned()
-        .ok_or_else(|| FlowError::Internal {
-            message: "config flow output node must be an object".to_string(),
-            location: FlowErrorLocation::at_path("node".to_string()),
-        })?;
-
-    if let Some(tool_value) = node_map.remove("tool") {
-        let tool_map = tool_value.as_object().ok_or_else(|| FlowError::Internal {
-            message: "config flow output node.tool must be an object".to_string(),
-            location: FlowErrorLocation::at_path("node.tool".to_string()),
-        })?;
-        let component_id = tool_map
-            .get("component")
-            .and_then(Value::as_str)
-            .ok_or_else(|| FlowError::Internal {
-                message: "config flow output node.tool missing component".to_string(),
-                location: FlowErrorLocation::at_path("node.tool.component".to_string()),
-            })?;
-
-        if node_map.contains_key(component_id) {
-            return Err(FlowError::Internal {
-                message: format!(
-                    "config flow output node already contains component '{component_id}'"
-                ),
-                location: FlowErrorLocation::at_path("node".to_string()),
-            });
-        }
-
-        let mut payload = Map::new();
-        let mut pack_alias: Option<Value> = None;
-        let mut operation: Option<Value> = None;
-        for (key, value) in tool_map {
-            match key.as_str() {
-                "component" => {}
-                "pack_alias" => {
-                    let alias = value.as_str().ok_or_else(|| FlowError::Internal {
-                        message: "config flow output node.tool.pack_alias must be a string"
-                            .to_string(),
-                        location: FlowErrorLocation::at_path("node.tool.pack_alias".to_string()),
-                    })?;
-                    pack_alias = Some(Value::String(alias.to_string()));
-                }
-                "operation" => {
-                    let op = value.as_str().ok_or_else(|| FlowError::Internal {
-                        message: "config flow output node.tool.operation must be a string"
-                            .to_string(),
-                        location: FlowErrorLocation::at_path("node.tool.operation".to_string()),
-                    })?;
-                    operation = Some(Value::String(op.to_string()));
-                }
-                _ => {
-                    payload.insert(key.clone(), value.clone());
-                }
-            }
-        }
-
-        node_map.insert(component_id.to_string(), Value::Object(payload));
-        if let Some(alias) = pack_alias {
-            node_map.insert("pack_alias".to_string(), alias);
-        }
-        if let Some(op) = operation {
-            node_map.insert("operation".to_string(), op);
-        }
+    let normalized = normalize_node_map(node)?;
+    let mut map = Map::new();
+    map.insert(normalized.component_id.clone(), normalized.payload.clone());
+    if let Some(alias) = normalized.pack_alias {
+        map.insert("pack_alias".to_string(), Value::String(alias));
     }
+    if let Some(op) = normalized.operation {
+        map.insert("operation".to_string(), Value::String(op));
+    }
+    let routing_value =
+        serde_json::to_value(&normalized.routing).map_err(|e| FlowError::Internal {
+            message: format!("serialize routing: {e}"),
+            location: FlowErrorLocation::at_path("node.routing".to_string()),
+        })?;
+    map.insert("routing".to_string(), routing_value);
 
-    Ok(Value::Object(node_map))
+    Ok(Value::Object(map))
 }

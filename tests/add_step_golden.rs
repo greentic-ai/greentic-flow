@@ -2,7 +2,7 @@ use greentic_flow::{
     add_step::{AddStepSpec, apply_plan, plan_add_step, validate_flow},
     compile_flow,
     component_catalog::{ComponentMetadata, MemoryCatalog},
-    flow_ir::{Route, parse_flow_to_ir},
+    flow_ir::parse_flow_to_ir,
     loader::load_ygtc_from_str,
     splice::NEXT_NODE_PLACEHOLDER,
 };
@@ -26,20 +26,17 @@ fn add_step_golden_flow() {
     });
 
     let spec = AddStepSpec {
-        new_id: "mid".to_string(),
-        after: "start".to_string(),
-        component_id: "ai.greentic.echo".to_string(),
-        pack_alias: None,
-        operation: None,
-        payload: json!({ "message": "hello" }),
-        routing: Some(vec![Route {
-            to: Some(NEXT_NODE_PLACEHOLDER.to_string()),
-            ..Route::default()
-        }]),
+        after: Some("start".to_string()),
+        node_id_hint: Some("mid".to_string()),
+        node: json!({
+            "ai.greentic.echo": { "message": "hello" },
+            "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
+        }),
+        allow_cycles: false,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan success");
-    let updated = apply_plan(&ir, plan);
+    let updated = apply_plan(&ir, plan, false).expect("apply");
     let diags = validate_flow(&updated, &catalog);
     assert!(
         diags.is_empty(),

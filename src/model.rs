@@ -17,9 +17,9 @@ fn default_routing() -> Value {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowDoc {
     pub id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(rename = "type")]
     pub flow_type: String,

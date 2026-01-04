@@ -7,7 +7,7 @@ use greentic_flow::{
     splice::NEXT_NODE_PLACEHOLDER,
 };
 use indexmap::indexmap;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 #[test]
 fn add_step_with_real_manifest_catalog() {
@@ -78,16 +78,13 @@ fn add_step_with_real_manifest_catalog() {
     };
 
     let spec = AddStepSpec {
-        new_id: "mid".to_string(),
-        after: "start".to_string(),
-        component_id: component_id.clone(),
-        pack_alias: None,
-        operation: None,
-        payload: payload.clone(),
-        routing: Some(vec![Route {
-            to: Some(NEXT_NODE_PLACEHOLDER.to_string()),
-            ..Route::default()
-        }]),
+        after: Some("start".to_string()),
+        node_id_hint: Some("mid".to_string()),
+        node: json!({
+            component_id.clone(): payload.clone(),
+            "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ],
+        }),
+        allow_cycles: false,
     };
 
     let plan = match plan_add_step(&flow, spec, &catalog) {
@@ -97,7 +94,7 @@ fn add_step_with_real_manifest_catalog() {
         }
     };
 
-    let updated = apply_plan(&flow, plan);
+    let updated = apply_plan(&flow, plan, false).expect("apply");
     let diags = validate_flow(&updated, &catalog);
     assert!(
         diags.is_empty(),
