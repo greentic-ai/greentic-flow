@@ -66,3 +66,52 @@ fn config_flow_harness_substitutes_state() {
     assert_eq!(qa.get("welcome_template"), Some(&json!("Howdy")));
     assert_eq!(qa.get("temperature"), Some(&json!(0.5)));
 }
+
+#[test]
+fn config_flow_normalizes_tool_nodes() {
+    let yaml = r#"id: tool-node
+type: component-config
+nodes:
+  emit_config:
+    template: |
+      {
+        "node_id": "COMPONENT_STEP",
+        "node": {
+          "tool": {
+            "component": "ai.greentic.hello",
+            "pack_alias": "my-pack",
+            "operation": "process",
+            "message": "{{state.message}}",
+            "flag": true
+          },
+          "routing": [
+            { "to": "NEXT_NODE_PLACEHOLDER" }
+          ]
+        }
+      }
+"#;
+
+    let mut answers = Map::new();
+    answers.insert("message".to_string(), json!("hi"));
+
+    let output = run_config_flow(
+        yaml,
+        std::path::Path::new("schemas/ygtc.flow.schema.json"),
+        &answers,
+    )
+    .unwrap();
+
+    assert_eq!(output.node_id, "COMPONENT_STEP");
+    let node = output.node.as_object().expect("node map");
+    assert!(!node.contains_key("tool"));
+
+    let payload = node
+        .get("ai.greentic.hello")
+        .and_then(Value::as_object)
+        .expect("component payload");
+    assert_eq!(payload.get("message"), Some(&json!("hi")));
+    assert_eq!(payload.get("flag"), Some(&json!(true)));
+
+    assert_eq!(node.get("pack_alias"), Some(&json!("my-pack")));
+    assert_eq!(node.get("operation"), Some(&json!("process")));
+}

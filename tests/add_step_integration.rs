@@ -1,0 +1,116 @@
+use std::{env, path::PathBuf};
+
+use greentic_flow::{
+    add_step::{AddStepSpec, apply_plan, plan_add_step, validate_flow},
+    component_catalog::{ComponentCatalog, ComponentMetadata, ManifestCatalog},
+    flow_ir::{ComponentRef, FlowIr, NodeIr, NodeKind, Route},
+    splice::NEXT_NODE_PLACEHOLDER,
+};
+use indexmap::indexmap;
+use serde_json::{Map, Value};
+
+#[test]
+fn add_step_with_real_manifest_catalog() {
+    let manifest_path = match env::var("ADD_STEP_REAL_MANIFEST") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => {
+            eprintln!("skip: set ADD_STEP_REAL_MANIFEST to run real-pack integration");
+            return;
+        }
+    };
+    let component_id = match env::var("ADD_STEP_REAL_COMPONENT") {
+        Ok(id) => id,
+        Err(_) => {
+            eprintln!("skip: set ADD_STEP_REAL_COMPONENT to run real-pack integration");
+            return;
+        }
+    };
+
+    let catalog = ManifestCatalog::load_from_paths(&[manifest_path]);
+    let Some(meta) = catalog.resolve(&component_id) else {
+        eprintln!(
+            "skip: component '{}' not found in manifest catalog",
+            component_id
+        );
+        return;
+    };
+
+    let payload = required_payload(&meta);
+    let mut nodes = indexmap::IndexMap::new();
+    nodes.insert(
+        "start".to_string(),
+        NodeIr {
+            id: "start".to_string(),
+            kind: NodeKind::Component(ComponentRef {
+                component_id: component_id.clone(),
+                pack_alias: None,
+                operation: None,
+                payload: payload.clone(),
+            }),
+            routing: vec![Route {
+                to: Some("end".to_string()),
+                ..Route::default()
+            }],
+        },
+    );
+    nodes.insert(
+        "end".to_string(),
+        NodeIr {
+            id: "end".to_string(),
+            kind: NodeKind::Component(ComponentRef {
+                component_id: component_id.clone(),
+                pack_alias: None,
+                operation: None,
+                payload: payload.clone(),
+            }),
+            routing: vec![Route {
+                out: true,
+                ..Route::default()
+            }],
+        },
+    );
+
+    let flow = FlowIr {
+        id: "real-flow".to_string(),
+        kind: "messaging".to_string(),
+        entrypoints: indexmap! {"default".to_string() => "start".to_string()},
+        nodes,
+    };
+
+    let spec = AddStepSpec {
+        new_id: "mid".to_string(),
+        after: "start".to_string(),
+        component_id: component_id.clone(),
+        pack_alias: None,
+        operation: None,
+        payload: payload.clone(),
+        routing: Some(vec![Route {
+            to: Some(NEXT_NODE_PLACEHOLDER.to_string()),
+            ..Route::default()
+        }]),
+    };
+
+    let plan = match plan_add_step(&flow, spec, &catalog) {
+        Ok(plan) => plan,
+        Err(diags) => {
+            panic!("plan failed: {:?}", diags);
+        }
+    };
+
+    let updated = apply_plan(&flow, plan);
+    let diags = validate_flow(&updated, &catalog);
+    assert!(
+        diags.is_empty(),
+        "expected validated flow, got diagnostics: {:?}",
+        diags
+    );
+}
+
+fn required_payload(meta: &ComponentMetadata) -> Value {
+    // Build a payload with placeholder strings for each required key.
+    let mut map = Map::new();
+    for key in &meta.required_fields {
+        map.insert(key.clone(), Value::String("placeholder".to_string()));
+    }
+    Value::Object(map)
+}

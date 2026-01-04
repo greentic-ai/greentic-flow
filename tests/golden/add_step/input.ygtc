@@ -1,0 +1,14 @@
+id: main
+type: messaging
+start: start
+nodes:
+  start:
+    qa.process:
+      welcome: "hi"
+    routing:
+      - to: end
+  end:
+    qa.process:
+      welcome: "bye"
+    routing:
+      - out: true

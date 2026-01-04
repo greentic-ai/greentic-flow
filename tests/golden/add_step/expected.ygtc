@@ -1,0 +1,19 @@
+id: main
+type: messaging
+start: start
+nodes:
+  end:
+    qa.process:
+      welcome: "bye"
+    routing:
+      - out: true
+  mid:
+    ai.greentic.echo:
+      message: "hello"
+    routing:
+      - to: end
+  start:
+    qa.process:
+      welcome: "hi"
+    routing:
+      - to: mid

@@ -4,9 +4,12 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::result_large_err)]
 
+pub mod add_step;
+pub mod component_catalog;
 pub mod config_flow;
 pub mod error;
 pub mod flow_bundle;
+pub mod flow_ir;
 pub mod ir;
 pub mod json_output;
 pub mod lint;
