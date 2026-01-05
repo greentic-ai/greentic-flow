@@ -72,7 +72,7 @@ fn config_flow_harness_substitutes_state() {
 }
 
 #[test]
-fn config_flow_normalizes_tool_nodes() {
+fn config_flow_rejects_tool_nodes() {
     let yaml = r#"id: tool-node
 type: component-config
 nodes:
@@ -98,24 +98,10 @@ nodes:
     let mut answers = Map::new();
     answers.insert("message".to_string(), json!("hi"));
 
-    let output = run_config_flow(
+    let result = run_config_flow(
         yaml,
         std::path::Path::new("schemas/ygtc.flow.schema.json"),
         &answers,
-    )
-    .unwrap();
-
-    assert_eq!(output.node_id, "COMPONENT_STEP");
-    let node = output.node.as_object().expect("node map");
-    assert!(!node.contains_key("tool"));
-
-    let payload = node
-        .get("ai.greentic.hello")
-        .and_then(Value::as_object)
-        .expect("component payload");
-    assert_eq!(payload.get("message"), Some(&json!("hi")));
-    assert_eq!(payload.get("flag"), Some(&json!(true)));
-
-    assert_eq!(node.get("pack_alias"), Some(&json!("my-pack")));
-    assert_eq!(node.get("operation"), Some(&json!("process")));
+    );
+    assert!(result.is_err(), "legacy tool nodes must be rejected");
 }

@@ -9,6 +9,7 @@ pub fn rewrite_placeholder_routes(
     fallback: &[Route],
     allow_cycles: bool,
     anchor: &str,
+    require_placeholder: bool,
 ) -> std::result::Result<Vec<Route>, String> {
     let mut out = Vec::new();
     let mut replaced = false;
@@ -31,7 +32,19 @@ pub fn rewrite_placeholder_routes(
         out.push(route);
     }
 
+    if !replaced && require_placeholder {
+        return Err(
+            "Config flow output missing NEXT_NODE_PLACEHOLDER; cannot preserve anchor routing semantics."
+                .to_string(),
+        );
+    }
+
     if !replaced {
+        for f in fallback {
+            if !allow_cycles && f.to.as_deref() == Some(anchor) {
+                return Err("routing would introduce a cycle back to anchor".to_string());
+            }
+        }
         out.extend_from_slice(fallback);
     }
     Ok(out)

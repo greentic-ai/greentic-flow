@@ -14,7 +14,7 @@ use crate::{
 };
 
 use self::{
-    id::generate_node_id,
+    id::{generate_node_id, is_placeholder_value},
     normalize::normalize_node_map,
     rewire::{apply_threaded_routing, rewrite_placeholder_routes},
     validate::validate_schema_and_flow,
@@ -60,6 +60,19 @@ pub fn plan_add_step(
             return Err(diags);
         }
     };
+
+    if let Some(hint) = spec.node_id_hint.as_deref()
+        && is_placeholder_value(hint)
+    {
+        diags.push(Diagnostic {
+            code: "ADD_STEP_NODE_ID_PLACEHOLDER",
+            message: format!(
+                "Config flow emitted placeholder node id '{hint}'; update greentic-component to emit the component name."
+            ),
+            location: Some("add_step.node_id".to_string()),
+        });
+        return Err(diags);
+    }
 
     let normalized = match normalize_node_map(spec.node.clone()) {
         Ok(node) => node,
@@ -118,6 +131,7 @@ pub fn plan_add_step(
         &anchor_old_routing,
         spec.allow_cycles,
         &anchor,
+        true,
     )
     .map_err(|msg| {
         vec![Diagnostic {

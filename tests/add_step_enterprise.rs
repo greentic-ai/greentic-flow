@@ -20,7 +20,7 @@ fn catalog_with(id: &str, required: Vec<&str>) -> MemoryCatalog {
 }
 
 #[test]
-fn tool_wrapper_normalized_and_schema_valid() {
+fn tool_wrapper_rejected() {
     let flow = r#"id: main
 type: messaging
 start: start
@@ -47,12 +47,8 @@ nodes:
         allow_cycles: false,
     };
 
-    let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
-    let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply+validate");
-    let doc = updated.to_doc().expect("to_doc");
-    let inserted = doc.nodes.get("mid").expect("mid node");
-    assert!(inserted.raw.contains_key("ai.greentic.hello"));
-    assert!(!inserted.raw.contains_key("tool"));
+    let plan = plan_add_step(&ir, spec, &catalog);
+    assert!(plan.is_err(), "expected tool emission to be rejected");
 }
 
 #[test]
@@ -100,7 +96,7 @@ nodes:
 }
 
 #[test]
-fn deterministic_id_generated_when_hint_placeholder() {
+fn placeholder_hint_rejected() {
     let flow = r#"id: main
 type: messaging
 start: start
@@ -123,8 +119,8 @@ nodes:
         allow_cycles: false,
     };
 
-    let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
-    assert_eq!(plan.new_node.id, "ai_greentic_echo__after__start");
+    let plan = plan_add_step(&ir, spec, &catalog);
+    assert!(plan.is_err(), "placeholder hints must be rejected");
 }
 
 #[test]
@@ -222,4 +218,88 @@ nodes:
     assert_eq!(new_routes.len(), 2);
     assert_eq!(new_routes[0].to.as_deref(), Some("a"));
     assert_eq!(new_routes[1].to.as_deref(), Some("b"));
+}
+
+#[test]
+fn rejects_tool_emission() {
+    let flow = r#"id: main
+type: messaging
+start: start
+nodes:
+  start:
+    qa.process: {}
+    routing:
+      - out: true
+"#;
+    let ir = parse_flow_to_ir(flow).expect("parse");
+    let catalog = catalog_with("component.exec", vec![]);
+    let spec = AddStepSpec {
+        after: Some("start".to_string()),
+        node_id_hint: None,
+        node: json!({
+            "tool": { "component": "component.exec", "operation": "run" },
+            "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
+        }),
+        allow_cycles: false,
+    };
+    let plan = plan_add_step(&ir, spec, &catalog);
+    assert!(plan.is_err());
+}
+
+#[test]
+fn rejects_missing_operation_for_exec() {
+    let flow = r#"id: main
+type: messaging
+start: start
+nodes:
+  start:
+    qa.process: {}
+    routing:
+      - out: true
+"#;
+    let ir = parse_flow_to_ir(flow).expect("parse");
+    let catalog = catalog_with("component.exec", vec![]);
+    let spec = AddStepSpec {
+        after: Some("start".to_string()),
+        node_id_hint: None,
+        node: json!({
+            "component.exec": {},
+            "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
+        }),
+        allow_cycles: false,
+    };
+    let plan = plan_add_step(&ir, spec, &catalog);
+    assert!(plan.is_err());
+}
+
+#[test]
+fn accepts_component_exec_with_operation() {
+    let flow = r#"id: main
+type: messaging
+start: start
+nodes:
+  start:
+    qa.process: {}
+    routing:
+      - out: true
+"#;
+    let ir = parse_flow_to_ir(flow).expect("parse");
+    let catalog = catalog_with("component.exec", vec![]);
+    let spec = AddStepSpec {
+        after: Some("start".to_string()),
+        node_id_hint: None,
+        node: json!({
+            "component.exec": { "foo": "bar" },
+            "operation": "run",
+            "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
+        }),
+        allow_cycles: false,
+    };
+    let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
+    let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
+    assert!(
+        updated
+            .nodes
+            .contains_key("component_exec__run__after__start")
+    );
 }

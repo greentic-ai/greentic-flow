@@ -19,15 +19,17 @@ fn slugify(raw: &str) -> String {
 fn is_placeholder(hint: Option<&str>) -> bool {
     match hint {
         None => true,
-        Some(h) => {
-            let trimmed = h.trim();
-            trimmed.is_empty()
-                || matches!(
-                    trimmed,
-                    "STEP" | "NODE" | "COMPONENT_STEP" | "INSERT_NODE" | "NEW_NODE"
-                )
-        }
+        Some(h) => is_placeholder_value(h),
     }
+}
+
+pub fn is_placeholder_value(hint: &str) -> bool {
+    let trimmed = hint.trim();
+    trimmed.is_empty()
+        || matches!(
+            trimmed,
+            "STEP" | "NODE" | "COMPONENT_STEP" | "INSERT_NODE" | "NEW_NODE"
+        )
 }
 
 pub fn generate_node_id<'a, I: Iterator<Item = &'a str>>(

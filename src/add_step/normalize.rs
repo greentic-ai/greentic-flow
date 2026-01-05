@@ -1,4 +1,4 @@
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::{
     error::{FlowError, FlowErrorLocation, Result},
@@ -24,8 +24,12 @@ pub fn normalize_node_map(value: Value) -> Result<NormalizedNode> {
             location: FlowErrorLocation::at_path("node".to_string()),
         })?;
 
-    if let Some(tool) = map.remove("tool") {
-        map = unwrap_tool(tool, map)?;
+    if map.contains_key("tool") {
+        return Err(FlowError::Internal {
+            message: "Legacy tool emission is not supported. Update greentic-component to emit component.exec nodes without tool."
+                .to_string(),
+            location: FlowErrorLocation::at_path("node.tool".to_string()),
+        });
     }
 
     let mut component: Option<(String, Value)> = None;
@@ -87,6 +91,13 @@ pub fn normalize_node_map(value: Value) -> Result<NormalizedNode> {
         location: FlowErrorLocation::at_path("node".to_string()),
     })?;
 
+    if component_id == "component.exec" && operation.as_deref().unwrap_or("").is_empty() {
+        return Err(FlowError::Internal {
+            message: "component.exec requires a non-empty operation".to_string(),
+            location: FlowErrorLocation::at_path("node.operation".to_string()),
+        });
+    }
+
     let routes = parse_routes(routing.unwrap_or(Value::Array(Vec::new())))?;
 
     Ok(NormalizedNode {
@@ -96,64 +107,6 @@ pub fn normalize_node_map(value: Value) -> Result<NormalizedNode> {
         payload,
         routing: routes,
     })
-}
-
-fn unwrap_tool(tool: Value, mut existing: Map<String, Value>) -> Result<Map<String, Value>> {
-    let tool_map = tool.as_object().ok_or_else(|| FlowError::Internal {
-        message: "node.tool must be an object".to_string(),
-        location: FlowErrorLocation::at_path("node.tool".to_string()),
-    })?;
-
-    let component_id = tool_map
-        .get("component")
-        .and_then(Value::as_str)
-        .ok_or_else(|| FlowError::Internal {
-            message: "node.tool missing component".to_string(),
-            location: FlowErrorLocation::at_path("node.tool.component".to_string()),
-        })?;
-
-    if existing.contains_key(component_id) {
-        return Err(FlowError::Internal {
-            message: format!("node already contains component '{component_id}'"),
-            location: FlowErrorLocation::at_path("node".to_string()),
-        });
-    }
-
-    let mut payload = Map::new();
-    let mut pack_alias: Option<Value> = None;
-    let mut operation: Option<Value> = None;
-    for (k, v) in tool_map {
-        match k.as_str() {
-            "component" => {}
-            "pack_alias" => {
-                let alias = v.as_str().ok_or_else(|| FlowError::Internal {
-                    message: "node.tool.pack_alias must be a string".to_string(),
-                    location: FlowErrorLocation::at_path("node.tool.pack_alias".to_string()),
-                })?;
-                pack_alias = Some(Value::String(alias.to_string()));
-            }
-            "operation" => {
-                let op = v.as_str().ok_or_else(|| FlowError::Internal {
-                    message: "node.tool.operation must be a string".to_string(),
-                    location: FlowErrorLocation::at_path("node.tool.operation".to_string()),
-                })?;
-                operation = Some(Value::String(op.to_string()));
-            }
-            _ => {
-                payload.insert(k.clone(), v.clone());
-            }
-        }
-    }
-
-    existing.insert(component_id.to_string(), Value::Object(payload));
-    if let Some(alias) = pack_alias {
-        existing.insert("pack_alias".to_string(), alias);
-    }
-    if let Some(op) = operation {
-        existing.insert("operation".to_string(), op);
-    }
-
-    Ok(existing)
 }
 
 fn parse_routes(raw: Value) -> Result<Vec<Route>> {
