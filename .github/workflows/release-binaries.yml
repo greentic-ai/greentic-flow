@@ -5,6 +5,7 @@ on:
     branches: [ master ]
     tags:
       - "v*"
+      - "greentic-flow-v*"
 
 permissions:
   contents: write
