@@ -2,7 +2,6 @@ name: Release binaries (binstall)
 
 on:
   push:
-    branches: [ master ]
     tags:
       - "v*"
 
@@ -23,16 +22,8 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
     runs-on: ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Select release tag
-        id: tag
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "branch" && "${GITHUB_REF_NAME}" == "master" ]]; then
-            echo "tag=nightly" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -50,5 +41,3 @@ jobs:
           checksum: sha256
           include: LICENSE
           manifest-path: Cargo.toml
-          binstall: true
-          tag: ${{ steps.tag.outputs.tag }}
