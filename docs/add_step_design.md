@@ -17,6 +17,9 @@ invariants before rendering back to YGTC.
 - `ComponentCatalog` trait exposes `resolve(id) -> ComponentMetadata`.
 - `ManifestCatalog` loads component.manifest.json files; `MemoryCatalog` lets
   tests seed components. `required_fields` drives config validation.
+- `ManifestCatalog` now normalizes legacy manifests where `operations` is an
+  array of strings (e.g., `["run"]` becomes `[{ "name": "run" }]`), so callers
+  do not need to pre-process manifests.
 
 ### add-step flow
 1. **Plan** – `plan_add_step(flow_ir, spec, catalog)` checks anchor existence,
@@ -30,6 +33,24 @@ invariants before rendering back to YGTC.
    `COMPONENT_PAYLOAD_REQUIRED`, `COMPONENT_CONFIG_REQUIRED`,
    `QUESTIONS_FIELDS_REQUIRED`, `TEMPLATE_EMPTY`. Consumers should fail on any
    error diagnostics.
+
+### Config flow helpers
+- `run_config_flow` now accepts YAML with missing/invalid `type` and defaults it
+  to `component-config` before validation and execution.
+- `run_config_flow_from_path` reads from disk, normalizes type, executes, and
+  returns `{ node_id, node }` with the node normalized against add-step rules
+  (no `tool`, non-empty `component.exec` operation, etc.).
+
+### Convenience APIs for callers (CLI and integrators)
+- `anchor_candidates(flow_ir)` returns a deterministic anchor list with the
+  entrypoint target first, followed by remaining nodes in insertion order.
+- `add_step_from_config_flow(flow_yaml, config_flow_path, schema_path,
+  manifest_paths, after, answers, allow_cycles)` wraps:
+  - load pack flow into IR,
+  - build `ManifestCatalog` from provided manifests,
+  - run the config flow with answers,
+  - plan/apply add-step with validation,
+  - return an updated `FlowDoc` ready for serialization.
 
 ### Tests
 - Golden test under `tests/golden/add_step/` round-trips through plan/apply/

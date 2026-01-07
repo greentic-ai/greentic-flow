@@ -31,7 +31,8 @@ pub fn run_config_flow(
     schema_path: &Path,
     answers: &Map<String, Value>,
 ) -> Result<ConfigFlowOutput> {
-    let doc = load_ygtc_from_str_with_schema(yaml, schema_path)?;
+    let normalized_yaml = normalize_config_flow_yaml(yaml)?;
+    let doc = load_ygtc_from_str_with_schema(&normalized_yaml, schema_path)?;
     let flow = compile_flow(doc.clone())?;
     let mut state = answers.clone();
 
@@ -92,6 +93,20 @@ pub fn run_config_flow(
         message: "config flow exceeded traversal limit".to_string(),
         location: FlowErrorLocation::at_path("nodes".to_string()),
     })
+}
+
+/// Load config flow YAML from disk, applying type normalization before execution.
+pub fn run_config_flow_from_path(
+    path: &Path,
+    schema_path: &Path,
+    answers: &Map<String, Value>,
+) -> Result<ConfigFlowOutput> {
+    let text = std::fs::read_to_string(path).map_err(|e| FlowError::Internal {
+        message: format!("read config flow {}: {e}", path.display()),
+        location: FlowErrorLocation::at_path(path.display().to_string())
+            .with_source_path(Some(path)),
+    })?;
+    run_config_flow(&text, schema_path, answers)
 }
 
 fn resolve_entry(doc: &crate::model::FlowDoc) -> String {
@@ -224,4 +239,26 @@ fn normalize_node_shape(node: Value) -> Result<Value> {
     map.insert("routing".to_string(), routing_value);
 
     Ok(Value::Object(map))
+}
+
+fn normalize_config_flow_yaml(yaml: &str) -> Result<String> {
+    let mut value: Value = serde_yaml_bw::from_str(yaml).map_err(|e| FlowError::Yaml {
+        message: e.to_string(),
+        location: FlowErrorLocation::at_path("config_flow".to_string()),
+    })?;
+    if let Some(map) = value.as_object_mut() {
+        match map.get("type") {
+            Some(Value::String(_)) => {}
+            _ => {
+                map.insert(
+                    "type".to_string(),
+                    Value::String("component-config".to_string()),
+                );
+            }
+        }
+    }
+    serde_yaml_bw::to_string(&value).map_err(|e| FlowError::Internal {
+        message: format!("normalize config flow: {e}"),
+        location: FlowErrorLocation::at_path("config_flow".to_string()),
+    })
 }

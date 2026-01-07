@@ -105,3 +105,33 @@ nodes:
     );
     assert!(result.is_err(), "legacy tool nodes must be rejected");
 }
+
+#[test]
+fn config_flow_missing_type_defaults() {
+    let yaml = r#"id: cfg
+start: q
+nodes:
+  q:
+    questions:
+      fields:
+        - id: message
+          default: "hi"
+          prompt: "message"
+          type: "string"
+    routing:
+      - to: emit
+  emit:
+    template: |
+      { "node_id": "hello", "node": { "component.exec": { "component": "ai.greentic.hello" }, "operation": "go", "routing": [ { "to": "NEXT_NODE_PLACEHOLDER" } ] } }
+"#;
+
+    let answers = Map::new();
+    let output = run_config_flow(
+        yaml,
+        std::path::Path::new("schemas/ygtc.flow.schema.json"),
+        &answers,
+    )
+    .expect("config flow should normalize missing type");
+
+    assert_eq!(output.node_id, "hello");
+}

@@ -6,11 +6,16 @@ pub mod validate;
 
 use indexmap::IndexMap;
 use serde_json::Value;
+use std::{fs, path::Path};
 
 use crate::{
     component_catalog::ComponentCatalog,
+    component_catalog::ManifestCatalog,
+    config_flow::run_config_flow,
     error::{FlowError, FlowErrorLocation, Result},
     flow_ir::{ComponentRef, FlowIr, NodeIr, NodeKind, Route},
+    loader::load_ygtc_from_str,
+    model::FlowDoc,
 };
 
 use self::{
@@ -321,4 +326,58 @@ pub fn apply_and_validate(
     let updated = apply_plan(flow, plan, allow_cycles)?;
     validate_schema_and_flow(&updated, catalog)?;
     Ok(updated)
+}
+
+/// Return ordered anchor candidates for UX: entrypoint target first (if present), then remaining nodes in insertion order.
+pub fn anchor_candidates(flow: &FlowIr) -> Vec<String> {
+    let mut seen = IndexMap::new();
+    if let Some((_name, target)) = flow.entrypoints.get_index(0) {
+        seen.insert(target.clone(), ());
+    }
+    for id in flow.nodes.keys() {
+        seen.entry(id.clone()).or_insert(());
+    }
+    seen.keys().cloned().collect()
+}
+
+/// Execute a config flow and insert its emitted node into the target flow.
+pub fn add_step_from_config_flow(
+    flow_yaml: &str,
+    config_flow_path: &Path,
+    schema_path: &Path,
+    manifests: &[impl AsRef<Path>],
+    after: Option<String>,
+    answers: &serde_json::Map<String, Value>,
+    allow_cycles: bool,
+) -> Result<FlowDoc> {
+    let flow_doc = load_ygtc_from_str(flow_yaml)?;
+    let flow_ir = FlowIr::from_doc(flow_doc)?;
+    let catalog = ManifestCatalog::load_from_paths(manifests);
+
+    let config_yaml = fs::read_to_string(config_flow_path).map_err(|e| FlowError::Internal {
+        message: format!("read config flow {}: {e}", config_flow_path.display()),
+        location: FlowErrorLocation::at_path(config_flow_path.display().to_string())
+            .with_source_path(Some(config_flow_path)),
+    })?;
+    let output = run_config_flow(&config_yaml, schema_path, answers)?;
+
+    let spec = AddStepSpec {
+        after,
+        node_id_hint: Some(output.node_id.clone()),
+        node: output.node.clone(),
+        allow_cycles,
+    };
+
+    let plan =
+        plan_add_step(&flow_ir, spec, &catalog).map_err(|diags| {
+            match diagnostics_to_error(diags) {
+                Ok(_) => FlowError::Internal {
+                    message: "add_step diagnostics unexpectedly empty".to_string(),
+                    location: FlowErrorLocation::at_path("add_step".to_string()),
+                },
+                Err(e) => e,
+            }
+        })?;
+    let updated = apply_and_validate(&flow_ir, plan, &catalog, allow_cycles)?;
+    updated.to_doc()
 }

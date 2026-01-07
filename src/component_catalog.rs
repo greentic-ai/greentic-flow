@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs, path::Path};
 
 use serde::Deserialize;
+use serde_json::{Value, json};
 /// Minimal metadata needed to validate that a component exists and which config keys
 /// are required.
 #[derive(Debug, Clone)]
@@ -38,20 +39,23 @@ impl ManifestCatalog {
         for path in paths {
             let path = path.as_ref();
             if let Ok(text) = fs::read_to_string(path)
-                && let Ok(manifest) = serde_json::from_str::<Manifest>(&text)
+                && let Ok(mut value) = serde_json::from_str::<Value>(&text)
             {
-                entries.insert(
-                    manifest.id.clone(),
-                    ComponentMetadata {
-                        id: manifest.id,
-                        required_fields: manifest
-                            .config_schema
-                            .unwrap_or_default()
-                            .required
-                            .clone(),
-                    },
-                );
-                continue;
+                normalize_manifest_value(&mut value);
+                if let Ok(manifest) = serde_json::from_value::<Manifest>(value) {
+                    entries.insert(
+                        manifest.id.clone(),
+                        ComponentMetadata {
+                            id: manifest.id,
+                            required_fields: manifest
+                                .config_schema
+                                .unwrap_or_default()
+                                .required
+                                .clone(),
+                        },
+                    );
+                    continue;
+                }
             }
             // Continue without crashing on unreadable manifests to keep the catalog usable.
         }
@@ -86,5 +90,20 @@ impl ComponentCatalog for MemoryCatalog {
 impl ComponentCatalog for Box<dyn ComponentCatalog> {
     fn resolve(&self, component_id: &str) -> Option<ComponentMetadata> {
         self.as_ref().resolve(component_id)
+    }
+}
+
+/// Normalize legacy manifest shapes in-place (e.g., operations as an array of strings).
+pub fn normalize_manifest_value(value: &mut Value) {
+    if let Some(ops) = value.get_mut("operations").and_then(Value::as_array_mut) {
+        let mut normalized = Vec::with_capacity(ops.len());
+        for entry in ops.drain(..) {
+            if let Value::String(s) = entry {
+                normalized.push(json!({ "name": s }));
+            } else {
+                normalized.push(entry);
+            }
+        }
+        *ops = normalized;
     }
 }
