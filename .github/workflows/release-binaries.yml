@@ -2,6 +2,7 @@ name: Release binaries (binstall)
 
 on:
   push:
+    branches: [ master ]
     tags:
       - "v*"
 
@@ -18,11 +19,10 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
     runs-on: ${{ matrix.os }}
-    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -32,7 +32,7 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: Build and upload binaries
-        uses: taiki-e/upload-rust-binary-action@v1
+        uses: taiki-e/upload-rust-binary-action@v2
         with:
           bin: "greentic-flow ygtc-lint"
           target: ${{ matrix.target }}
@@ -41,3 +41,4 @@ jobs:
           checksum: sha256
           include: LICENSE
           manifest-path: Cargo.toml
+          binstall: true
