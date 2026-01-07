@@ -32,7 +32,7 @@ jobs:
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: Build and upload binaries
-        uses: taiki-e/upload-rust-binary-action@v2
+        uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: "greentic-flow ygtc-lint"
           target: ${{ matrix.target }}
