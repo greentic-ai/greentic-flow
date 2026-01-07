@@ -86,10 +86,22 @@ pub fn normalize_node_map(value: Value) -> Result<NormalizedNode> {
         component = Some((key, val));
     }
 
-    let (component_id, payload) = component.ok_or_else(|| FlowError::Internal {
+    let (component_id, mut payload) = component.ok_or_else(|| FlowError::Internal {
         message: "node must contain a component key".to_string(),
         location: FlowErrorLocation::at_path("node".to_string()),
     })?;
+
+    if component_id == "component.exec"
+        && operation.is_none()
+        && let Some(map) = payload.as_object_mut()
+        && let Some(op) = map.get("operation").and_then(Value::as_str)
+    {
+        let trimmed = op.trim();
+        if !trimmed.is_empty() {
+            operation = Some(trimmed.to_string());
+            map.remove("operation");
+        }
+    }
 
     if component_id == "component.exec" && operation.as_deref().unwrap_or("").is_empty() {
         return Err(FlowError::Internal {

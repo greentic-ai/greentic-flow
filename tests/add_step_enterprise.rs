@@ -303,3 +303,34 @@ nodes:
             .contains_key("component_exec__run__after__start")
     );
 }
+
+#[test]
+fn accepts_component_exec_with_operation_nested_in_payload() {
+    let flow = r#"id: main
+type: messaging
+start: start
+nodes:
+  start:
+    qa.process: {}
+    routing:
+      - out: true
+"#;
+    let ir = parse_flow_to_ir(flow).expect("parse");
+    let catalog = catalog_with("component.exec", vec![]);
+    let spec = AddStepSpec {
+        after: Some("start".to_string()),
+        node_id_hint: None,
+        node: json!({
+            "component.exec": { "foo": "bar", "operation": "run" },
+            "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
+        }),
+        allow_cycles: false,
+    };
+    let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
+    let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
+    assert!(
+        updated
+            .nodes
+            .contains_key("component_exec__run__after__start")
+    );
+}
