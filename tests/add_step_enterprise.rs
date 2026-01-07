@@ -297,11 +297,7 @@ nodes:
     };
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
     let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
-    assert!(
-        updated
-            .nodes
-            .contains_key("component_exec__run__after__start")
-    );
+    assert!(updated.nodes.contains_key("run"));
 }
 
 #[test]
@@ -328,9 +324,31 @@ nodes:
     };
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
     let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
-    assert!(
-        updated
-            .nodes
-            .contains_key("component_exec__run__after__start")
-    );
+    assert!(updated.nodes.contains_key("run"));
+}
+
+#[test]
+fn inserts_into_empty_flow() {
+    let flow = r#"id: main
+type: messaging
+start: start
+nodes: {}
+"#;
+    let ir = parse_flow_to_ir(flow).expect("parse");
+    let catalog = catalog_with("ai.greentic.echo", vec![]);
+    let spec = AddStepSpec {
+        after: None,
+        node_id_hint: None,
+        node: json!({
+            "ai.greentic.echo": {},
+            "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
+        }),
+        allow_cycles: false,
+    };
+    let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
+    let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
+    assert_eq!(updated.nodes.len(), 1);
+    let (id, node) = updated.nodes.get_index(0).unwrap();
+    assert_eq!(updated.entrypoints.get("default"), Some(id));
+    assert_eq!(node.routing.len(), 0);
 }

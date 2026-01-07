@@ -54,6 +54,12 @@ impl ManifestCatalog {
                                 .clone(),
                         },
                     );
+                    entries
+                        .entry("component.exec".to_string())
+                        .or_insert(ComponentMetadata {
+                            id: "component.exec".to_string(),
+                            required_fields: Vec::new(),
+                        });
                     continue;
                 }
             }

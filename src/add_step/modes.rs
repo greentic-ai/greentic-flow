@@ -12,9 +12,7 @@ use super::normalize::normalize_node_map;
 #[derive(Debug, Clone)]
 pub enum AddStepModeInput {
     Default {
-        component_id: String,
-        pack_alias: Option<String>,
-        operation: Option<String>,
+        operation: String,
         payload: Value,
         routing: Option<Value>,
     },
@@ -31,20 +29,12 @@ pub fn materialize_node(
 ) -> Result<(Option<String>, Value)> {
     match mode {
         AddStepModeInput::Default {
-            component_id,
-            pack_alias,
             operation,
             payload,
             routing,
         } => {
             let mut node = serde_json::Map::new();
-            node.insert(component_id.clone(), payload);
-            if let Some(alias) = pack_alias {
-                node.insert("pack_alias".to_string(), Value::String(alias));
-            }
-            if let Some(op) = operation {
-                node.insert("operation".to_string(), Value::String(op));
-            }
+            node.insert(operation.clone(), payload);
             if let Some(routing) = routing {
                 node.insert("routing".to_string(), routing);
             } else {
@@ -55,8 +45,8 @@ pub fn materialize_node(
             }
             let value = Value::Object(node.clone());
             // Ensure shape is valid up front.
-            let _ = normalize_node_map(value.clone())?;
-            Ok((None, value))
+            let normalized = normalize_node_map(value.clone())?;
+            Ok((Some(normalized.operation.clone()), Value::Object(node)))
         }
         AddStepModeInput::Config {
             config_flow,
@@ -67,7 +57,7 @@ pub fn materialize_node(
             let output = run_config_flow(&config_flow, &schema_path, &answers)?;
             let normalized = normalize_node_map(output.node.clone())?;
             let mut hint = Some(output.node_id.clone());
-            if normalized.component_id.is_empty() {
+            if normalized.operation.is_empty() {
                 hint = None;
             }
             Ok((hint, output.node))

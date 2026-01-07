@@ -3,16 +3,14 @@ use serde_json::Value;
 use crate::{
     error::{FlowError, FlowErrorLocation, Result},
     flow_ir::Route,
-    util::is_valid_component_key,
 };
 
 #[derive(Debug, Clone)]
 pub struct NormalizedNode {
-    pub component_id: String,
-    pub pack_alias: Option<String>,
-    pub operation: Option<String>,
+    pub operation: String,
     pub payload: Value,
     pub routing: Vec<Route>,
+    pub telemetry: Option<Value>,
 }
 
 pub fn normalize_node_map(value: Value) -> Result<NormalizedNode> {
@@ -32,98 +30,136 @@ pub fn normalize_node_map(value: Value) -> Result<NormalizedNode> {
         });
     }
 
-    let mut component: Option<(String, Value)> = None;
-    let mut pack_alias: Option<String> = None;
-    let mut operation: Option<String> = None;
+    let mut op_key: Option<String> = None;
+    let mut op_value: Option<Value> = None;
     let mut routing: Option<Value> = None;
+    let mut telemetry: Option<Value> = None;
 
     for (key, val) in map.clone() {
         match key.as_str() {
-            "pack_alias" => {
-                pack_alias = Some(
-                    val.as_str()
-                        .ok_or_else(|| FlowError::Internal {
-                            message: "pack_alias must be a string".to_string(),
-                            location: FlowErrorLocation::at_path("pack_alias".to_string()),
-                        })?
-                        .to_string(),
-                );
-                map.remove(&key);
-            }
-            "operation" => {
-                operation = Some(
-                    val.as_str()
-                        .ok_or_else(|| FlowError::Internal {
-                            message: "operation must be a string".to_string(),
-                            location: FlowErrorLocation::at_path("operation".to_string()),
-                        })?
-                        .to_string(),
-                );
-                map.remove(&key);
-            }
             "routing" => {
                 routing = Some(val.clone());
+                map.remove(&key);
+            }
+            "telemetry" => {
+                telemetry = Some(val.clone());
                 map.remove(&key);
             }
             _ => {}
         }
     }
 
-    for (key, val) in map {
-        if component.is_some() {
+    // Legacy path: component.exec + operation
+    if map.contains_key("component.exec") {
+        let mut op = value
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if op.trim().is_empty()
+            && let Some(payload_op) = map
+                .get("component.exec")
+                .and_then(|v| v.get("operation"))
+                .and_then(Value::as_str)
+        {
+            op = payload_op.to_string();
+        }
+        if op.trim().is_empty() {
             return Err(FlowError::Internal {
-                message: "node must have exactly one component key".to_string(),
-                location: FlowErrorLocation::at_path(format!("nodes.{key}")),
+                message: "component.exec requires a non-empty operation".to_string(),
+                location: FlowErrorLocation::at_path("node.operation".to_string()),
             });
         }
-        if !is_valid_component_key(&key) {
-            return Err(FlowError::BadComponentKey {
-                component: key,
-                node_id: "add_step".to_string(),
+        let payload = map
+            .remove("component.exec")
+            .unwrap_or(Value::Object(Default::default()));
+        let payload = if let Some(obj) = payload.as_object()
+            && obj.contains_key("operation")
+        {
+            let mut obj = obj.clone();
+            obj.remove("operation");
+            Value::Object(obj)
+        } else {
+            payload
+        };
+        let routes = parse_routes(routing.unwrap_or(Value::Array(Vec::new())))?;
+        return Ok(NormalizedNode {
+            operation: op,
+            payload,
+            routing: routes,
+            telemetry,
+        });
+    }
+
+    for (key, val) in map {
+        if op_key.is_some() {
+            return Err(FlowError::Internal {
+                message: "node must have exactly one operation key".to_string(),
                 location: FlowErrorLocation::at_path("node".to_string()),
             });
         }
-        component = Some((key, val));
+        op_key = Some(key);
+        op_value = Some(val);
     }
 
-    let (component_id, mut payload) = component.ok_or_else(|| FlowError::Internal {
-        message: "node must contain a component key".to_string(),
+    // Legacy path: component.exec + operation
+    if op_key.is_none() && value.get("component.exec").is_some() {
+        let op = value
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if op.trim().is_empty() {
+            return Err(FlowError::Internal {
+                message: "component.exec requires a non-empty operation".to_string(),
+                location: FlowErrorLocation::at_path("node.operation".to_string()),
+            });
+        }
+        let payload = value
+            .get("component.exec")
+            .cloned()
+            .unwrap_or(Value::Object(Default::default()));
+        op_key = Some(op);
+        op_value = Some(payload);
+    }
+
+    let operation = op_key.ok_or_else(|| FlowError::Internal {
+        message: "node must contain exactly one operation key".to_string(),
         location: FlowErrorLocation::at_path("node".to_string()),
     })?;
 
-    if component_id == "component.exec"
-        && operation.is_none()
-        && let Some(map) = payload.as_object_mut()
-        && let Some(op) = map.get("operation").and_then(Value::as_str)
-    {
-        let trimmed = op.trim();
-        if !trimmed.is_empty() {
-            operation = Some(trimmed.to_string());
-            map.remove("operation");
-        }
-    }
-
-    if component_id == "component.exec" && operation.as_deref().unwrap_or("").is_empty() {
-        return Err(FlowError::Internal {
-            message: "component.exec requires a non-empty operation".to_string(),
-            location: FlowErrorLocation::at_path("node.operation".to_string()),
-        });
-    }
+    let payload = op_value.unwrap_or(Value::Object(Default::default()));
 
     let routes = parse_routes(routing.unwrap_or(Value::Array(Vec::new())))?;
 
     Ok(NormalizedNode {
-        component_id,
-        pack_alias,
         operation,
         payload,
         routing: routes,
+        telemetry,
     })
 }
 
 fn parse_routes(raw: Value) -> Result<Vec<Route>> {
     if raw.is_null() {
         return Ok(Vec::new());
+    }
+
+    if let Some(shorthand) = raw.as_str() {
+        return match shorthand {
+            "out" => Ok(vec![Route {
+                out: true,
+                ..Route::default()
+            }]),
+            "reply" => Ok(vec![Route {
+                reply: true,
+                ..Route::default()
+            }]),
+            other => Err(FlowError::Internal {
+                message: format!("unsupported routing shorthand '{other}'"),
+                location: FlowErrorLocation::at_path("routing".to_string()),
+            }),
+        };
     }
 
     let arr = raw.as_array().ok_or_else(|| FlowError::Internal {

@@ -73,14 +73,6 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
                 location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
             }
         })?;
-        let component_id = ComponentId::new(node_doc.component.as_str()).map_err(|e| {
-            crate::error::FlowError::InvalidIdentifier {
-                kind: "component",
-                value: node_doc.component.clone(),
-                detail: e.to_string(),
-                location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
-            }
-        })?;
         let routing = compile_routing(&node_doc.routing, &doc.nodes, node_id_str)?;
         let telemetry = node_doc
             .telemetry
@@ -91,21 +83,41 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
                 sampling: t.sampling.clone(),
             })
             .unwrap_or_default();
+        // V2: single op key in raw.
+        let mut op_key: Option<String> = None;
+        let mut payload: Option<Value> = None;
+        for (k, v) in &node_doc.raw {
+            op_key = Some(k.clone());
+            payload = Some(v.clone());
+        }
+        let output_mapping = node_doc
+            .raw
+            .get("output")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
+        let operation = op_key.ok_or_else(|| crate::error::FlowError::Internal {
+            message: format!("node '{node_id_str}' missing operation key"),
+            location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
+        })?;
+        let is_builtin = matches!(operation.as_str(), "questions" | "template");
+        let is_legacy = doc.schema_version.unwrap_or(1) < 2 || operation.contains('.');
+        let (component_id, op_field) = if is_builtin || is_legacy {
+            (operation.clone(), None)
+        } else {
+            ("component.exec".to_string(), Some(operation.clone()))
+        };
         let node = Node {
             id: node_id.clone(),
             component: FlowComponentRef {
-                id: component_id,
-                pack_alias: node_doc.pack_alias.clone(),
-                operation: node_doc.operation.clone(),
+                id: ComponentId::new(&component_id).unwrap(),
+                pack_alias: None,
+                operation: op_field,
             },
             input: InputMapping {
-                mapping: node_doc.payload.clone(),
+                mapping: payload.unwrap_or_else(|| Value::Object(Default::default())),
             },
             output: OutputMapping {
-                mapping: node_doc
-                    .output
-                    .clone()
-                    .unwrap_or_else(|| Value::Object(Default::default())),
+                mapping: output_mapping,
             },
             routing,
             telemetry,
@@ -167,6 +179,30 @@ fn compile_routing(
 
     let routes: Vec<RouteDoc> = if raw.is_null() {
         Vec::new()
+    } else if let Some(shorthand) = raw.as_str() {
+        match shorthand {
+            "out" => vec![RouteDoc {
+                to: None,
+                out: Some(true),
+                status: None,
+                reply: None,
+            }],
+            "reply" => vec![RouteDoc {
+                to: None,
+                out: None,
+                status: None,
+                reply: Some(true),
+            }],
+            other => {
+                return Err(crate::error::FlowError::Routing {
+                    node_id: node_id.to_string(),
+                    message: format!("invalid routing shorthand '{other}'"),
+                    location: crate::error::FlowErrorLocation::at_path(format!(
+                        "nodes.{node_id}.routing"
+                    )),
+                });
+            }
+        }
     } else {
         serde_json::from_value(raw.clone()).map_err(|e| crate::error::FlowError::Routing {
             node_id: node_id.to_string(),

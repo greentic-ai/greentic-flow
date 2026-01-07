@@ -29,6 +29,8 @@ pub struct FlowDoc {
     pub parameters: Value,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub schema_version: Option<u32>,
     #[serde(default = "default_entrypoints")]
     pub entrypoints: BTreeMap<String, Value>,
     pub nodes: BTreeMap<String, NodeDoc>,
@@ -36,20 +38,14 @@ pub struct FlowDoc {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeDoc {
-    #[serde(skip_serializing, skip_deserializing, default)]
-    pub component: String,
-    #[serde(skip_serializing, skip_deserializing, default)]
-    pub pack_alias: Option<String>,
+    #[serde(default = "default_routing")]
+    pub routing: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetryDoc>,
     #[serde(skip_serializing, skip_deserializing, default)]
     pub operation: Option<String>,
     #[serde(skip_serializing, skip_deserializing, default)]
     pub payload: Value,
-    #[serde(skip_serializing, skip_deserializing, default)]
-    pub output: Option<Value>,
-    #[serde(default = "default_routing")]
-    pub routing: Value,
-    #[serde(skip_serializing, skip_deserializing, default)]
-    pub telemetry: Option<TelemetryDoc>,
     #[serde(flatten, default)]
     pub raw: BTreeMap<String, Value>,
 }

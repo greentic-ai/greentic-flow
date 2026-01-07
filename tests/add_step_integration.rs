@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 use greentic_flow::{
     add_step::{AddStepSpec, apply_plan, plan_add_step, validate_flow},
     component_catalog::{ComponentCatalog, ComponentMetadata, ManifestCatalog},
-    flow_ir::{ComponentRef, FlowIr, NodeIr, NodeKind, Route},
+    flow_ir::{FlowIr, NodeIr, Route},
     splice::NEXT_NODE_PLACEHOLDER,
 };
 use indexmap::indexmap;
@@ -41,38 +41,35 @@ fn add_step_with_real_manifest_catalog() {
         "start".to_string(),
         NodeIr {
             id: "start".to_string(),
-            kind: NodeKind::Component(ComponentRef {
-                component_id: component_id.clone(),
-                pack_alias: None,
-                operation: None,
-                payload: payload.clone(),
-            }),
+            operation: "op".to_string(),
+            payload: payload.clone(),
+            output: serde_json::Value::Object(Default::default()),
             routing: vec![Route {
                 to: Some("end".to_string()),
                 ..Route::default()
             }],
+            telemetry: None,
         },
     );
     nodes.insert(
         "end".to_string(),
         NodeIr {
             id: "end".to_string(),
-            kind: NodeKind::Component(ComponentRef {
-                component_id: component_id.clone(),
-                pack_alias: None,
-                operation: None,
-                payload: payload.clone(),
-            }),
+            operation: "op".to_string(),
+            payload: payload.clone(),
+            output: serde_json::Value::Object(Default::default()),
             routing: vec![Route {
                 out: true,
                 ..Route::default()
             }],
+            telemetry: None,
         },
     );
 
     let flow = FlowIr {
         id: "real-flow".to_string(),
         kind: "messaging".to_string(),
+        schema_version: Some(2),
         entrypoints: indexmap! {"default".to_string() => "start".to_string()},
         nodes,
     };

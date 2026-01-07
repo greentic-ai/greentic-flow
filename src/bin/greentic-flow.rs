@@ -176,6 +176,39 @@ fn handle_new(mut args: NewArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::resolve_config_flow;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn resolves_default_config_flow_from_manifest() {
+        let manifest = json!({
+            "id": "ai.greentic.hello",
+            "dev_flows": {
+                "default": {
+                    "graph": {
+                        "id": "cfg",
+                        "type": "component-config",
+                        "nodes": {}
+                    }
+                }
+            }
+        });
+        let manifest_file = NamedTempFile::new().expect("temp file");
+        std::fs::write(manifest_file.path(), manifest.to_string()).expect("write manifest");
+
+        let (yaml, schema_path) =
+            resolve_config_flow(None, &[manifest_file.path().to_path_buf()]).expect("resolve");
+        assert!(yaml.contains("id: cfg"));
+        assert_eq!(
+            schema_path,
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas/ygtc.flow.schema.json")
+        );
+    }
+}
 fn write_flow_file(path: &Path, content: &str, force: bool) -> Result<()> {
     if path.exists() && !force {
         anyhow::bail!(
@@ -223,6 +256,48 @@ fn render_flow_yaml(id: &str, description: &str, kind: FlowKind) -> Result<Strin
         yaml.push('\n');
     }
     Ok(yaml)
+}
+
+fn resolve_config_flow(
+    config_flow_arg: Option<PathBuf>,
+    manifests: &[PathBuf],
+) -> Result<(String, PathBuf)> {
+    if let Some(path) = config_flow_arg {
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("read config flow {}", path.display()))?;
+        return Ok((text, path));
+    }
+
+    let manifest_path = manifests.first().ok_or_else(|| {
+        anyhow::anyhow!(
+            "config mode requires --config-flow or at least one --manifest with dev_flows.default"
+        )
+    })?;
+    let manifest_text = fs::read_to_string(manifest_path)
+        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let manifest_json: serde_json::Value =
+        serde_json::from_str(&manifest_text).context("parse manifest JSON")?;
+    let default_graph = manifest_json
+        .get("dev_flows")
+        .and_then(|v| v.get("default"))
+        .and_then(|v| v.get("graph"))
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("manifest missing dev_flows.default.graph"))?;
+    let mut graph = default_graph;
+    if let Some(obj) = graph.as_object_mut()
+        && !obj.contains_key("type")
+    {
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String("component-config".to_string()),
+        );
+    }
+    let yaml =
+        serde_yaml_bw::to_string(&graph).context("render dev_flows.default.graph to YAML")?;
+    // Use repo-local schema path as a reasonable default (absolute to avoid cwd issues).
+    let schema_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas/ygtc.flow.schema.json");
+    Ok((yaml, schema_path))
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -291,10 +366,13 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
 
     let mode_input = match args.mode {
         AddStepMode::Default => {
-            let component_id = args
-                .component_id
+            let operation = args
+                .operation
                 .clone()
-                .ok_or_else(|| anyhow::anyhow!("--component is required in default mode"))?;
+                .or(args.component_id.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--operation (or --component) is required in default mode")
+                })?;
             let payload_json: serde_json::Value =
                 serde_json::from_str(&args.payload).context("parse --payload as JSON")?;
             let routing_json = if let Some(r) = args.routing.as_ref() {
@@ -303,20 +381,14 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
                 None
             };
             AddStepModeInput::Default {
-                component_id,
-                pack_alias: args.pack_alias.clone(),
-                operation: args.operation.clone(),
+                operation,
                 payload: payload_json,
                 routing: routing_json,
             }
         }
         AddStepMode::Config => {
-            let config_path = args
-                .config_flow
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("--config-flow is required in config mode"))?;
-            let config_flow = fs::read_to_string(&config_path)
-                .with_context(|| format!("read config flow {}", config_path.display()))?;
+            let (config_flow, schema_path) =
+                resolve_config_flow(args.config_flow.clone(), &args.manifests)?;
             let mut answers = serde_json::Map::new();
             if let Some(a) = args.answers {
                 let parsed: serde_json::Value =
@@ -336,7 +408,7 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
             }
             AddStepModeInput::Config {
                 config_flow,
-                schema_path: config_path.into_boxed_path(),
+                schema_path: schema_path.into_boxed_path(),
                 answers,
             }
         }

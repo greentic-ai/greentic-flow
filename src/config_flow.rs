@@ -5,7 +5,6 @@ use regex::Regex;
 use serde_json::{Map, Value};
 
 use crate::{
-    add_step::normalize::normalize_node_map,
     compile_flow,
     error::{FlowError, FlowErrorLocation, Result},
     loader::load_ygtc_from_str_with_schema,
@@ -216,29 +215,23 @@ fn extract_config_output(value: Value) -> Result<ConfigFlowOutput> {
         .ok_or_else(|| FlowError::Internal {
             message: "config flow output missing node".to_string(),
             location: FlowErrorLocation::at_path("node".to_string()),
-        })
-        .and_then(normalize_node_shape)?;
-    Ok(ConfigFlowOutput { node_id, node })
-}
-
-fn normalize_node_shape(node: Value) -> Result<Value> {
-    let normalized = normalize_node_map(node)?;
-    let mut map = Map::new();
-    map.insert(normalized.component_id.clone(), normalized.payload.clone());
-    if let Some(alias) = normalized.pack_alias {
-        map.insert("pack_alias".to_string(), Value::String(alias));
-    }
-    if let Some(op) = normalized.operation {
-        map.insert("operation".to_string(), Value::String(op));
-    }
-    let routing_value =
-        serde_json::to_value(&normalized.routing).map_err(|e| FlowError::Internal {
-            message: format!("serialize routing: {e}"),
-            location: FlowErrorLocation::at_path("node.routing".to_string()),
         })?;
-    map.insert("routing".to_string(), routing_value);
-
-    Ok(Value::Object(map))
+    if node.get("tool").is_some() {
+        return Err(FlowError::Internal {
+            message: "Legacy tool emission is not supported. Update greentic-component to emit component.exec nodes without tool."
+                .to_string(),
+            location: FlowErrorLocation::at_path("node.tool".to_string()),
+        });
+    }
+    if crate::add_step::id::is_placeholder_value(&node_id) {
+        return Err(FlowError::Internal {
+            message: format!(
+                "Config flow emitted placeholder node id '{node_id}'; update greentic-component to emit the component name."
+            ),
+            location: FlowErrorLocation::at_path("node_id".to_string()),
+        });
+    }
+    Ok(ConfigFlowOutput { node_id, node })
 }
 
 fn normalize_config_flow_yaml(yaml: &str) -> Result<String> {

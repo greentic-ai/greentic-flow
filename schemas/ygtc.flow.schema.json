@@ -29,6 +29,7 @@
       "additionalProperties": true,
       "description": "Optional entrypoints keyed by name (e.g., default, telegram, http:/path)."
     },
+    "schema_version": { "type": "integer", "minimum": 1 },
     "nodes": {
       "type": "object",
       "minProperties": 1,
@@ -36,60 +37,27 @@
       "patternProperties": {
         "^[a-zA-Z_][\\w-]*$": {
           "type": "object",
-          "description": "A node must have exactly one component key like messaging.telegram.sendMessage (namespace.adapter.operation) plus optional routing.",
           "minProperties": 1,
-          "maxProperties": 6,
+          "description": "Node keyed by human-friendly name; exactly one operation key plus optional metadata.",
           "properties": {
-            "questions": {
-              "type": "object",
-              "properties": {
-                "fields": {
+            "routing": {
+              "description": "Routing can be shorthand or explicit list",
+              "oneOf": [
+                { "type": "string", "enum": ["out", "reply"] },
+                {
                   "type": "array",
                   "items": {
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
-                      "id": { "type": "string", "minLength": 1 },
-                      "prompt": { "type": "string" },
-                      "type": {
-                        "type": "string",
-                        "enum": ["string", "number", "boolean", "enum"]
-                      },
-                      "default": {},
-                      "options": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                      }
-                    },
-                    "required": ["id", "prompt", "type"],
-                    "additionalProperties": true
+                      "to": { "type": "string" },
+                      "out": { "type": "boolean" },
+                      "status": { "type": "string" },
+                      "reply": { "type": "boolean" }
+                    }
                   }
                 }
-              },
-              "required": ["fields"],
-              "additionalProperties": true,
-              "description": "Prompt for configuration values; answers are stored under state.<id> by the runtime."
-            },
-            "template": {
-              "type": "string",
-              "description": "Template string rendered by the runtime into the final payload."
-            },
-            "routing": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "to": { "type": "string" },
-                  "out": { "type": "boolean" },
-                  "status": { "type": "string" },
-                  "reply": { "type": "boolean" }
-                }
-              }
-            },
-            "output": {
-              "type": "object",
-              "additionalProperties": true,
-              "description": "Optional output mapping configuration."
+              ]
             },
             "telemetry": {
               "type": "object",
@@ -103,12 +71,19 @@
                 "sampling": { "type": "string" }
               }
             },
-            "pack_alias": { "type": "string" },
-            "operation": { "type": "string" }
+            "output": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "retry": { "type": "object" },
+            "timeout": { "type": "object" },
+            "when": { "type": "object" },
+            "annotations": { "type": "object" },
+            "meta": { "type": "object" }
           },
           "patternProperties": {
-            "^[a-zA-Z][\\w.-]*\\.[\\w.-]+$": {
-            "description": "Opaque component payload – validated by the component itself. Adapter-backed components should follow the <namespace>.<adapter>.<operation> shape.",
+            "^[A-Za-z_][\\w-]*$": {
+              "description": "Operation payload (exactly one op key is required).",
               "additionalProperties": true
             }
           },

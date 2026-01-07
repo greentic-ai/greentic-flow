@@ -34,9 +34,6 @@ pub fn is_placeholder_value(hint: &str) -> bool {
 
 pub fn generate_node_id<'a, I: Iterator<Item = &'a str>>(
     hint: Option<&str>,
-    component_id: &str,
-    operation: Option<&str>,
-    pack_alias: Option<&str>,
     anchor: &str,
     existing: I,
 ) -> String {
@@ -46,16 +43,10 @@ pub fn generate_node_id<'a, I: Iterator<Item = &'a str>>(
         if !slug.is_empty() {
             slug
         } else {
-            slugify(component_id)
+            "node".to_string()
         }
     } else {
-        let mut parts = vec![slugify(component_id)];
-        if let Some(op) = operation {
-            parts.push(slugify(op));
-        }
-        if let Some(alias) = pack_alias {
-            parts.push(slugify(alias));
-        }
+        let mut parts = vec!["node".to_string()];
         parts.push("after".to_string());
         parts.push(slugify(anchor));
         parts.join("__")

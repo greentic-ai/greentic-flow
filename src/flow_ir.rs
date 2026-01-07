@@ -16,6 +16,7 @@ use crate::{
 pub struct FlowIr {
     pub id: String,
     pub kind: String,
+    pub schema_version: Option<u32>,
     pub entrypoints: IndexMap<String, String>,
     pub nodes: IndexMap<String, NodeIr>,
 }
@@ -23,31 +24,11 @@ pub struct FlowIr {
 #[derive(Debug, Clone)]
 pub struct NodeIr {
     pub id: String,
-    pub kind: NodeKind,
-    pub routing: Vec<Route>,
-}
-
-#[derive(Debug, Clone)]
-pub enum NodeKind {
-    Component(ComponentRef),
-    Questions {
-        fields: Value,
-    },
-    Template {
-        template: String,
-    },
-    Other {
-        component_id: String,
-        payload: Value,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct ComponentRef {
-    pub component_id: String,
-    pub pack_alias: Option<String>,
-    pub operation: Option<String>,
+    pub operation: String,
     pub payload: Value,
+    pub output: Value,
+    pub routing: Vec<Route>,
+    pub telemetry: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,42 +49,29 @@ fn is_false(value: &bool) -> bool {
 
 impl FlowIr {
     pub fn from_doc(doc: FlowDoc) -> Result<Self> {
+        let schema_version = doc.schema_version;
         let entrypoints = resolve_entrypoints(&doc);
         let mut nodes = IndexMap::new();
         for (id, node_doc) in doc.nodes {
+            let (operation, payload) = extract_operation(&node_doc, &id)?;
             let routing = parse_routing(&node_doc, &id)?;
-            let kind = match node_doc.component.as_str() {
-                "questions" => NodeKind::Questions {
-                    fields: node_doc.payload.clone(),
-                },
-                "template" => {
-                    let template =
-                        node_doc
-                            .payload
-                            .as_str()
-                            .ok_or_else(|| FlowError::Internal {
-                                message: "template node payload must be a string".to_string(),
-                                location: FlowErrorLocation::at_path(format!(
-                                    "nodes.{id}.template"
-                                )),
-                            })?;
-                    NodeKind::Template {
-                        template: template.to_string(),
-                    }
-                }
-                other => NodeKind::Component(ComponentRef {
-                    component_id: other.to_string(),
-                    pack_alias: node_doc.pack_alias.clone(),
-                    operation: node_doc.operation.clone(),
-                    payload: node_doc.payload.clone(),
-                }),
-            };
+            let output = node_doc
+                .raw
+                .get("output")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Map::new()));
             nodes.insert(
                 id.clone(),
                 NodeIr {
                     id: id.clone(),
-                    kind,
+                    operation,
+                    payload,
+                    output,
                     routing,
+                    telemetry: node_doc
+                        .telemetry
+                        .clone()
+                        .and_then(|t| serde_json::to_value(t).ok()),
                 },
             );
         }
@@ -111,6 +79,7 @@ impl FlowIr {
         Ok(FlowIr {
             id: doc.id,
             kind: doc.flow_type,
+            schema_version,
             entrypoints,
             nodes,
         })
@@ -119,66 +88,49 @@ impl FlowIr {
     pub fn to_doc(&self) -> Result<FlowDoc> {
         let mut nodes: BTreeMap<String, NodeDoc> = BTreeMap::new();
         for (id, node_ir) in &self.nodes {
-            let (component, payload, pack_alias, operation, raw) = match &node_ir.kind {
-                NodeKind::Component(comp) => {
-                    let mut raw = BTreeMap::new();
-                    raw.insert(comp.component_id.clone(), comp.payload.clone());
-                    if let Some(alias) = &comp.pack_alias {
-                        raw.insert("pack_alias".to_string(), Value::String(alias.clone()));
-                    }
-                    if let Some(op) = &comp.operation {
-                        raw.insert("operation".to_string(), Value::String(op.clone()));
-                    }
-                    (
-                        comp.component_id.clone(),
-                        comp.payload.clone(),
-                        comp.pack_alias.clone(),
-                        comp.operation.clone(),
-                        raw,
-                    )
-                }
-                NodeKind::Questions { fields } => {
-                    let mut raw = BTreeMap::new();
-                    raw.insert("questions".to_string(), fields.clone());
-                    ("questions".to_string(), fields.clone(), None, None, raw)
-                }
-                NodeKind::Template { template } => {
-                    let mut raw = BTreeMap::new();
-                    raw.insert("template".to_string(), Value::String(template.clone()));
-                    (
-                        "template".to_string(),
-                        Value::String(template.clone()),
-                        None,
-                        None,
-                        raw,
-                    )
-                }
-                NodeKind::Other {
-                    component_id,
-                    payload,
-                } => {
-                    let mut raw = BTreeMap::new();
-                    raw.insert(component_id.clone(), payload.clone());
-                    (component_id.clone(), payload.clone(), None, None, raw)
-                }
-            };
-
+            let mut raw = BTreeMap::new();
+            raw.insert(node_ir.operation.clone(), node_ir.payload.clone());
+            if !node_ir.output.is_object()
+                || !node_ir
+                    .output
+                    .as_object()
+                    .map(|m| m.is_empty())
+                    .unwrap_or(false)
+            {
+                raw.insert("output".to_string(), node_ir.output.clone());
+            }
             let routing_value =
                 serde_json::to_value(&node_ir.routing).map_err(|e| FlowError::Internal {
                     message: format!("serialize routing for node '{id}': {e}"),
                     location: FlowErrorLocation::at_path(format!("nodes.{id}.routing")),
                 })?;
-
+            let routing_yaml = if node_ir.routing.len() == 1
+                && node_ir.routing[0].out
+                && node_ir.routing[0].to.is_none()
+                && !node_ir.routing[0].reply
+                && node_ir.routing[0].status.is_none()
+            {
+                Value::String("out".to_string())
+            } else if node_ir.routing.len() == 1
+                && node_ir.routing[0].reply
+                && node_ir.routing[0].to.is_none()
+                && !node_ir.routing[0].out
+                && node_ir.routing[0].status.is_none()
+            {
+                Value::String("reply".to_string())
+            } else {
+                routing_value
+            };
             nodes.insert(
                 id.clone(),
                 NodeDoc {
-                    component,
-                    pack_alias,
-                    operation,
-                    payload,
-                    routing: routing_value,
-                    output: None,
-                    telemetry: None,
+                    routing: routing_yaml,
+                    telemetry: node_ir
+                        .telemetry
+                        .as_ref()
+                        .and_then(|t| serde_json::from_value(t.clone()).ok()),
+                    operation: Some(node_ir.operation.clone()),
+                    payload: node_ir.payload.clone(),
                     raw,
                 },
             );
@@ -192,6 +144,7 @@ impl FlowIr {
             start: self.entrypoints.get("default").cloned(),
             parameters: Value::Object(Map::new()),
             tags: Vec::new(),
+            schema_version: self.schema_version,
             entrypoints: BTreeMap::new(),
             nodes,
         })
@@ -216,6 +169,26 @@ fn resolve_entrypoints(doc: &FlowDoc) -> IndexMap<String, String> {
 }
 
 fn parse_routing(node: &NodeDoc, node_id: &str) -> Result<Vec<Route>> {
+    if node.routing.is_null() {
+        return Ok(Vec::new());
+    }
+    if let Some(s) = node.routing.as_str() {
+        return match s {
+            "out" => Ok(vec![Route {
+                out: true,
+                ..Route::default()
+            }]),
+            "reply" => Ok(vec![Route {
+                reply: true,
+                ..Route::default()
+            }]),
+            other => Err(FlowError::Routing {
+                node_id: node_id.to_string(),
+                message: format!("unsupported routing shorthand '{other}'"),
+                location: FlowErrorLocation::at_path(format!("nodes.{node_id}.routing")),
+            }),
+        };
+    }
     #[derive(serde::Deserialize)]
     struct RouteDoc {
         #[serde(default)]
@@ -228,14 +201,11 @@ fn parse_routing(node: &NodeDoc, node_id: &str) -> Result<Vec<Route>> {
         reply: Option<bool>,
     }
 
-    let routes: Vec<RouteDoc> = if node.routing.is_null() {
-        Vec::new()
-    } else {
+    let routes: Vec<RouteDoc> =
         serde_json::from_value(node.routing.clone()).map_err(|e| FlowError::Internal {
             message: format!("routing decode for node '{node_id}': {e}"),
             location: FlowErrorLocation::at_path(format!("nodes.{node_id}.routing")),
-        })?
-    };
+        })?;
 
     Ok(routes
         .into_iter()
@@ -252,4 +222,46 @@ fn parse_routing(node: &NodeDoc, node_id: &str) -> Result<Vec<Route>> {
 pub fn parse_flow_to_ir(yaml: &str) -> Result<FlowIr> {
     let doc = load_ygtc_from_str(yaml)?;
     FlowIr::from_doc(doc)
+}
+
+fn extract_operation(node: &NodeDoc, node_id: &str) -> Result<(String, Value)> {
+    let reserved = [
+        "routing",
+        "telemetry",
+        "output",
+        "retry",
+        "timeout",
+        "when",
+        "annotations",
+        "meta",
+    ];
+    let mut op_key: Option<String> = None;
+    let mut payload: Option<Value> = None;
+    for (k, v) in &node.raw {
+        if reserved.contains(&k.as_str()) {
+            continue;
+        }
+        if op_key.is_some() {
+            return Err(FlowError::Internal {
+                message: format!(
+                    "node '{node_id}' must have exactly one operation key, found multiple"
+                ),
+                location: FlowErrorLocation::at_path(format!("nodes.{node_id}")),
+            });
+        }
+        op_key = Some(k.clone());
+        payload = Some(v.clone());
+    }
+    if let (Some(k), Some(v)) = (op_key, payload) {
+        return Ok((k, v));
+    }
+
+    if let Some(op) = &node.operation {
+        return Ok((op.clone(), node.payload.clone()));
+    }
+
+    Err(FlowError::Internal {
+        message: format!("node '{node_id}' missing operation key"),
+        location: FlowErrorLocation::at_path(format!("nodes.{node_id}")),
+    })
 }

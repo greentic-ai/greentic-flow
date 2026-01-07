@@ -122,7 +122,7 @@ nodes:
       - to: emit
   emit:
     template: |
-      { "node_id": "hello", "node": { "component.exec": { "component": "ai.greentic.hello" }, "operation": "go", "routing": [ { "to": "NEXT_NODE_PLACEHOLDER" } ] } }
+      { "node_id": "hello", "node": { "go": { "input": "hi" }, "routing": [ { "to": "NEXT_NODE_PLACEHOLDER" } ] } }
 "#;
 
     let answers = Map::new();

@@ -1,14 +1,13 @@
 use crate::{
     error::{FlowError, FlowErrorLocation, Result, SchemaErrorDetail},
-    model::{FlowDoc, TelemetryDoc},
+    model::FlowDoc,
     path_safety::normalize_under_root,
-    util::is_valid_component_key,
 };
 use jsonschema::Draft;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_yaml_bw::Location as YamlLocation;
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{fs, path::Path};
 
 const INLINE_SOURCE: &str = "<inline>";
 const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
@@ -58,12 +57,15 @@ pub fn load_ygtc_from_str_with_source(
         location: FlowErrorLocation::at_path(schema_path.display().to_string())
             .with_source_path(Some(schema_path)),
     })?;
-    let safe_schema_path =
+    let safe_schema_path = if schema_path.is_absolute() {
+        schema_path.to_path_buf()
+    } else {
         normalize_under_root(&schema_root, schema_path).map_err(|e| FlowError::Internal {
             message: format!("schema path validation for {}: {e}", schema_path.display()),
             location: FlowErrorLocation::at_path(schema_path.display().to_string())
                 .with_source_path(Some(schema_path)),
-        })?;
+        })?
+    };
     let schema_label = safe_schema_path.display().to_string();
     let schema_text = fs::read_to_string(&safe_schema_path).map_err(|e| FlowError::Internal {
         message: format!("schema read from {schema_label}: {e}"),
@@ -90,28 +92,122 @@ pub(crate) fn load_with_schema_text(
 ) -> Result<FlowDoc> {
     let schema_label = schema_label.into();
     let source_label = source_label.into();
-    let v_yaml: serde_yaml_bw::Value =
+    let mut v_yaml: serde_yaml_bw::Value =
         serde_yaml_bw::from_str(yaml).map_err(|e| FlowError::Yaml {
             message: e.to_string(),
             location: yaml_error_location(&source_label, source_path, e.location()),
         })?;
+    ensure_nodes_mapping(&mut v_yaml);
     let v_json: Value = serde_json::to_value(&v_yaml).map_err(|e| FlowError::Internal {
         message: format!("yaml->json: {e}"),
         location: FlowErrorLocation::at_path(source_label.clone()).with_source_path(source_path),
     })?;
-    validate_json(
-        &v_json,
-        schema_text,
-        &schema_label,
-        schema_path,
-        &source_label,
-        source_path,
-    )?;
+    let schema_version = v_json
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .unwrap_or(2);
+    let nodes_empty = v_json
+        .get("nodes")
+        .and_then(Value::as_object)
+        .map(|m| m.is_empty())
+        .unwrap_or(false);
+    let reserved_for_count = [
+        "routing",
+        "telemetry",
+        "output",
+        "retry",
+        "timeout",
+        "when",
+        "annotations",
+        "meta",
+        "operation",
+    ];
+    let looks_legacy = v_json.get("nodes").and_then(Value::as_object).map(|nodes| {
+        nodes.values().any(|n| {
+            let (op_count, has_dot_key) = n
+                .as_object()
+                .map(|obj| {
+                    let op_count = obj
+                        .keys()
+                        .filter(|k| !reserved_for_count.contains(&k.as_str()))
+                        .count();
+                    let has_dot_key = obj.keys().any(|k| k.contains('.'));
+                    (op_count, has_dot_key)
+                })
+                .unwrap_or((0, false));
+            op_count != 1
+                || has_dot_key
+                || n.get("component.exec").is_some()
+                || n.get("operation").is_some()
+                || n.get("pack_alias").is_some()
+        })
+    });
+    if v_json.get("type").is_none() {
+        return Err(FlowError::Schema {
+            message: format!("{source_label}/type: missing required property 'type'"),
+            details: vec![SchemaErrorDetail {
+                message: "Missing required property 'type'".to_string(),
+                location: FlowErrorLocation::at_path(format!("{source_label}/type"))
+                    .with_source_path(source_path)
+                    .with_json_pointer(Some("/type".to_string())),
+            }],
+            location: FlowErrorLocation::at_path(source_label.clone())
+                .with_source_path(source_path),
+        });
+    }
 
-    let mut flow: FlowDoc = serde_yaml_bw::from_str(yaml).map_err(|e| FlowError::Yaml {
-        message: e.to_string(),
-        location: yaml_error_location(&source_label, source_path, e.location()),
-    })?;
+    if let Some(nodes) = v_json.get("nodes").and_then(Value::as_object) {
+        for id in nodes.keys() {
+            let Some(node_val) = nodes.get(id) else {
+                continue;
+            };
+            let Some(obj) = node_val.as_object() else {
+                continue;
+            };
+            let op_count = obj
+                .keys()
+                .filter(|k| !reserved_for_count.contains(&k.as_str()))
+                .count();
+            if op_count != 1 {
+                return Err(FlowError::NodeComponentShape {
+                    node_id: id.clone(),
+                    location: node_location(&source_label, source_path, id),
+                });
+            }
+        }
+    }
+
+    if !nodes_empty && schema_version >= 2 && !looks_legacy.unwrap_or(false) {
+        validate_json(
+            &v_json,
+            schema_text,
+            &schema_label,
+            schema_path,
+            &source_label,
+            source_path,
+        )?;
+    }
+
+    let mut flow: FlowDoc = match serde_yaml_bw::from_value(v_yaml.clone()) {
+        Ok(doc) => doc,
+        Err(e) => {
+            validate_json(
+                &v_json,
+                schema_text,
+                &schema_label,
+                schema_path,
+                &source_label,
+                source_path,
+            )?;
+            return Err(FlowError::Yaml {
+                message: e.to_string(),
+                location: yaml_error_location(&source_label, source_path, None),
+            });
+        }
+    };
+    if flow.schema_version.is_none() {
+        flow.schema_version = Some(2);
+    }
 
     let node_ids: Vec<String> = flow.nodes.keys().cloned().collect();
     for id in &node_ids {
@@ -119,75 +215,28 @@ pub(crate) fn load_with_schema_text(
             message: format!("node '{id}' missing after load"),
             location: node_location(&source_label, source_path, id),
         })?;
-
-        let mut component_kv: Option<(String, Value)> = None;
-        let mut routing: Option<Value> = None;
-        let mut output: Option<Value> = None;
-        let mut telemetry: Option<TelemetryDoc> = None;
-        let mut pack_alias: Option<String> = None;
-        let mut operation: Option<String> = None;
-
-        for (key, value) in &node.raw {
-            match key.as_str() {
-                "routing" => {
-                    routing = Some(value.clone());
-                    continue;
-                }
-                "output" => {
-                    output = Some(value.clone());
-                    continue;
-                }
-                "telemetry" => {
-                    telemetry =
-                        serde_json::from_value(value.clone()).map_err(|e| FlowError::Internal {
-                            message: format!("telemetry decode in node '{id}': {e}"),
-                            location: node_location(&source_label, source_path, id),
-                        })?;
-                    continue;
-                }
-                "pack_alias" => {
-                    pack_alias = value.as_str().map(|s| s.to_string());
-                    continue;
-                }
-                "operation" => {
-                    operation = value.as_str().map(|s| s.to_string());
-                    continue;
-                }
-                _ => {}
-            }
-
-            if component_kv.is_some() {
-                return Err(FlowError::NodeComponentShape {
-                    node_id: id.clone(),
-                    location: node_location(&source_label, source_path, id),
-                });
-            }
-            component_kv = Some((key.clone(), value.clone()));
-        }
-
-        let (component_key, payload) =
-            component_kv.ok_or_else(|| FlowError::NodeComponentShape {
-                node_id: id.clone(),
-                location: node_location(&source_label, source_path, id),
-            })?;
-        if !is_valid_component_key(&component_key) {
-            return Err(FlowError::BadComponentKey {
-                component: component_key,
+        let reserved = [
+            "routing",
+            "telemetry",
+            "output",
+            "retry",
+            "timeout",
+            "when",
+            "annotations",
+            "meta",
+            "operation",
+        ];
+        let op_count = node
+            .raw
+            .keys()
+            .filter(|k| !reserved.contains(&k.as_str()))
+            .count();
+        if op_count != 1 {
+            return Err(FlowError::NodeComponentShape {
                 node_id: id.clone(),
                 location: node_location(&source_label, source_path, id),
             });
         }
-
-        node.component = component_key;
-        node.payload = payload;
-        node.pack_alias = pack_alias;
-        node.operation = operation;
-        node.output = output;
-        if let Some(value) = routing {
-            node.routing = value;
-        }
-        node.telemetry = telemetry;
-        node.raw = BTreeMap::new();
     }
 
     for (from_id, node) in &flow.nodes {
@@ -220,6 +269,27 @@ fn parse_routes(
 ) -> Result<Vec<RouteDoc>> {
     if raw.is_null() {
         return Ok(Vec::new());
+    }
+    if let Some(shorthand) = raw.as_str() {
+        return match shorthand {
+            "out" => Ok(vec![RouteDoc {
+                to: Some("out".to_string()),
+                out: Some(true),
+                status: None,
+                reply: None,
+            }]),
+            "reply" => Ok(vec![RouteDoc {
+                to: None,
+                out: None,
+                status: None,
+                reply: Some(true),
+            }]),
+            other => Err(FlowError::Routing {
+                node_id: node_id.to_string(),
+                message: format!("invalid routing shorthand '{other}'"),
+                location: routing_location(source_label, source_path, node_id),
+            }),
+        };
     }
     serde_json::from_value::<Vec<RouteDoc>>(raw.clone()).map_err(|e| FlowError::Routing {
         node_id: node_id.to_string(),
@@ -301,6 +371,26 @@ fn validate_json(
         });
     }
     Ok(())
+}
+
+fn ensure_nodes_mapping(doc: &mut serde_yaml_bw::Value) {
+    let Some(mapping) = doc.as_mapping_mut() else {
+        return;
+    };
+    let nodes_key = serde_yaml_bw::Value::String("nodes".to_string(), None);
+    match mapping.get_mut(&nodes_key) {
+        Some(existing) => {
+            if existing.is_null() {
+                *existing = serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::new());
+            }
+        }
+        None => {
+            mapping.insert(
+                nodes_key,
+                serde_yaml_bw::Value::Mapping(serde_yaml_bw::Mapping::new()),
+            );
+        }
+    }
 }
 
 fn node_location(
