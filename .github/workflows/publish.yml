@@ -112,14 +112,14 @@ jobs:
           tar -C dist -czf "${archive}" "greentic-flow-v${version}-${target}"
 
           ARCHIVE="${archive}" python - <<'PY'
-import hashlib
-import os
-import pathlib
+          import hashlib
+          import os
+          import pathlib
 
-path = pathlib.Path(os.environ["ARCHIVE"])
-digest = hashlib.sha256(path.read_bytes()).hexdigest()
-path.with_suffix(path.suffix + ".sha256").write_text(f"{digest}  {path.name}\n")
-PY
+          path = pathlib.Path(os.environ["ARCHIVE"])
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          path.with_suffix(path.suffix + ".sha256").write_text(f"{digest}  {path.name}\n")
+          PY
 
           echo "archive=${archive}" >> "$GITHUB_OUTPUT"
           echo "checksum=${checksum}" >> "$GITHUB_OUTPUT"
