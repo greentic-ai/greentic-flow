@@ -51,13 +51,16 @@ nodes:
     assert_eq!(plan.anchor, "start");
     let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
 
+    let entry = updated.entrypoints.get("default").unwrap();
+    assert_eq!(entry, "hello-world");
+
     let start = updated.nodes.get("start").unwrap();
     assert_eq!(start.routing.len(), 1);
-    assert_eq!(start.routing[0].to.as_deref(), Some("hello-world"));
+    assert_eq!(start.routing[0].to.as_deref(), Some("a"));
 
     let inserted = updated.nodes.get("hello-world").unwrap();
     assert_eq!(inserted.routing.len(), 1);
-    assert_eq!(inserted.routing[0].to.as_deref(), Some("a"));
+    assert_eq!(inserted.routing[0].to.as_deref(), Some("start"));
 }
 
 #[test]
@@ -92,10 +95,7 @@ nodes:
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
-    assert_eq!(
-        plan.anchor, "a",
-        "lexicographic first node should be anchor"
-    );
+    assert_eq!(plan.anchor, "b", "first node in order should be anchor");
 }
 
 #[test]

@@ -133,11 +133,13 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             location: crate::error::FlowErrorLocation::at_path("id"),
         })?;
 
+    let entrypoints_map: BTreeMap<String, Value> = entrypoints.into_iter().collect();
+
     Ok(Flow {
         schema_version: "flow-v1".to_string(),
         id: flow_id,
         kind,
-        entrypoints,
+        entrypoints: entrypoints_map,
         nodes,
         metadata: FlowMetadata {
             title: doc.title,
@@ -162,7 +164,7 @@ pub fn compile_ygtc_file(path: &Path) -> Result<Flow> {
 
 fn compile_routing(
     raw: &Value,
-    nodes: &BTreeMap<String, crate::model::NodeDoc>,
+    nodes: &IndexMap<String, crate::model::NodeDoc>,
     node_id: &str,
 ) -> Result<Routing> {
     #[derive(serde::Deserialize)]

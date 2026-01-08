@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -86,9 +84,9 @@ impl FlowIr {
     }
 
     pub fn to_doc(&self) -> Result<FlowDoc> {
-        let mut nodes: BTreeMap<String, NodeDoc> = BTreeMap::new();
+        let mut nodes: IndexMap<String, NodeDoc> = IndexMap::new();
         for (id, node_ir) in &self.nodes {
-            let mut raw = BTreeMap::new();
+            let mut raw = IndexMap::new();
             raw.insert(node_ir.operation.clone(), node_ir.payload.clone());
             if !node_ir.output.is_object()
                 || !node_ir
@@ -145,7 +143,7 @@ impl FlowIr {
             parameters: Value::Object(Map::new()),
             tags: Vec::new(),
             schema_version: self.schema_version,
-            entrypoints: BTreeMap::new(),
+            entrypoints: IndexMap::new(),
             nodes,
         })
     }

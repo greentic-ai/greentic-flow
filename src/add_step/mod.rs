@@ -38,6 +38,7 @@ pub struct AddStepPlan {
     pub anchor: String,
     pub new_node: NodeIr,
     pub anchor_old_routing: Vec<Route>,
+    pub insert_before_entrypoint: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,7 +55,7 @@ pub fn plan_add_step(
 ) -> std::result::Result<AddStepPlan, Vec<Diagnostic>> {
     let mut diags = Vec::new();
 
-    let anchor = match resolve_anchor(flow, spec.after.as_deref()) {
+    let anchor_source = match resolve_anchor(flow, spec.after.as_deref()) {
         Ok(anchor) => anchor,
         Err(msg) => {
             diags.push(Diagnostic {
@@ -65,6 +66,15 @@ pub fn plan_add_step(
             return Err(diags);
         }
     };
+    let mut insert_before_entrypoint = false;
+    if spec.after.is_none() {
+        if let Some((_, target)) = flow.entrypoints.get_index(0)
+            && target == &anchor_source
+        {
+            insert_before_entrypoint = true;
+        }
+    }
+    let anchor = anchor_source;
 
     if let Some(hint) = spec.node_id_hint.as_deref()
         && is_placeholder_value(hint)
@@ -137,6 +147,7 @@ pub fn plan_add_step(
         anchor,
         new_node,
         anchor_old_routing,
+        insert_before_entrypoint,
     })
 }
 
@@ -149,17 +160,7 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
         });
     }
 
-    if let Some(mut anchor) = nodes.get(&plan.anchor).cloned() {
-        let anchor_routing = apply_threaded_routing(
-            &plan.new_node.id,
-            &plan.anchor_old_routing,
-            allow_cycles,
-            &plan.anchor,
-        )?;
-        anchor.routing = anchor_routing;
-        nodes.insert(plan.anchor.clone(), anchor);
-    } else if nodes.is_empty() {
-        // First node insertion: set default entrypoint to the new node.
+    if nodes.is_empty() {
         let mut entrypoints = IndexMap::new();
         entrypoints.insert("default".to_string(), plan.new_node.id.clone());
         nodes.insert(plan.new_node.id.clone(), plan.new_node);
@@ -170,20 +171,71 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
             entrypoints,
             nodes,
         });
-    } else {
+    }
+
+    if plan.insert_before_entrypoint {
+        // Insert new node before the entrypoint target: keep anchor routing, retarget entrypoints.
+        let mut new_nodes = IndexMap::new();
+        for (id, node) in nodes.into_iter() {
+            if id == plan.anchor {
+                let mut new_node = plan.new_node.clone();
+                new_node.routing = vec![Route {
+                    to: Some(plan.anchor.clone()),
+                    ..Route::default()
+                }];
+                new_nodes.insert(new_node.id.clone(), new_node);
+            }
+            new_nodes.insert(id.clone(), node);
+        }
+
+        let mut entrypoints = flow.entrypoints.clone();
+        for (_name, target) in entrypoints.iter_mut() {
+            if target == &plan.anchor {
+                *target = plan.new_node.id.clone();
+            }
+        }
+
+        return Ok(FlowIr {
+            id: flow.id.clone(),
+            kind: flow.kind.clone(),
+            schema_version: flow.schema_version,
+            entrypoints,
+            nodes: new_nodes,
+        });
+    }
+
+    let mut reordered = IndexMap::new();
+    let mut anchor_found = false;
+    for (id, node) in nodes.into_iter() {
+        if id == plan.anchor {
+            anchor_found = true;
+            let mut anchor = node.clone();
+            anchor.routing = apply_threaded_routing(
+                &plan.new_node.id,
+                &plan.anchor_old_routing,
+                allow_cycles,
+                &plan.anchor,
+            )?;
+            reordered.insert(id.clone(), anchor);
+            reordered.insert(plan.new_node.id.clone(), plan.new_node.clone());
+        } else {
+            reordered.insert(id.clone(), node);
+        }
+    }
+
+    if !anchor_found {
         return Err(FlowError::Internal {
             message: format!("anchor '{}' not found", plan.anchor),
             location: FlowErrorLocation::at_path(format!("nodes.{}", plan.anchor)),
         });
     }
-    nodes.insert(plan.new_node.id.clone(), plan.new_node);
 
     Ok(FlowIr {
         id: flow.id.clone(),
         kind: flow.kind.clone(),
         schema_version: flow.schema_version,
         entrypoints: flow.entrypoints.clone(),
-        nodes,
+        nodes: reordered,
     })
 }
 

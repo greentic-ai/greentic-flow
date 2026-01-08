@@ -32,6 +32,7 @@ use greentic_types::flow_resolve::{
     ComponentSourceRefV1, FLOW_RESOLVE_SCHEMA_VERSION, FlowResolveV1, NodeResolveV1, ResolveModeV1,
     read_flow_resolve, sidecar_path_for_flow, write_flow_resolve,
 };
+use indexmap::IndexMap;
 use sha2::{Digest, Sha256};
 #[derive(Parser, Debug)]
 #[command(name = "greentic-flow", about = "Flow scaffolding helpers")]
@@ -156,8 +157,11 @@ struct UpdateStepArgs {
     /// Optional explicit component id (not yet used; reserved for future resolution).
     #[arg(long = "component")]
     component: Option<String>,
-    /// Write back to the flow file instead of stdout.
-    #[arg(long = "write")]
+    /// Show the updated flow without writing it.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+    /// Backward-compatible write flag (ignored; writing is default).
+    #[arg(long = "write", hide = true)]
     write: bool,
 }
 
@@ -272,8 +276,8 @@ fn handle_new(args: NewArgs) -> Result<()> {
         parameters: serde_json::Value::Object(Default::default()),
         tags: Vec::new(),
         schema_version: Some(args.schema_version),
-        entrypoints: std::collections::BTreeMap::new(),
-        nodes: std::collections::BTreeMap::new(),
+        entrypoints: IndexMap::new(),
+        nodes: IndexMap::new(),
     };
     let mut yaml = serde_yaml_bw::to_string(&doc)?;
     if !yaml.ends_with('\n') {
@@ -670,8 +674,11 @@ struct AddStepArgs {
     /// Allow cycles/back-edges during insertion.
     #[arg(long = "allow-cycles")]
     allow_cycles: bool,
-    /// Write back to the flow file instead of stdout.
-    #[arg(long = "write")]
+    /// Show the updated flow without writing it.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+    /// Backward-compatible write flag (ignored; writing is default).
+    #[arg(long = "write", hide = true)]
     write: bool,
     /// Validate only without writing output.
     #[arg(long = "validate-only")]
@@ -807,7 +814,7 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
         return Ok(());
     }
 
-    if args.write {
+    if !args.dry_run {
         let tmp_path = args.flow_path.with_extension("ygtc.tmp");
         fs::write(&tmp_path, &output).with_context(|| format!("write {}", tmp_path.display()))?;
         fs::rename(&tmp_path, &args.flow_path)
@@ -878,7 +885,7 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
     // Adjust entrypoint if it targeted the removed node in other ops; here node stays, so no-op.
     let yaml = serialize_doc(&doc_out)?;
     load_ygtc_from_str(&yaml)?; // schema validation
-    if args.write {
+    if !args.dry_run {
         write_flow_file(&args.flow_path, &yaml, true)?;
         println!(
             "Updated step '{}' in {}",

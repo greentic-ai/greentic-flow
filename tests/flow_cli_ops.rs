@@ -194,6 +194,155 @@ nodes:
 }
 
 #[test]
+fn add_step_defaults_to_entrypoint_before_existing() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+start: a
+type: messaging
+schema_version: 2
+nodes:
+  a:
+    op: {}
+    routing:
+      - to: b
+  b:
+    tail: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--routing")
+        .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .arg("--write")
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&flow_path);
+    let default_target = yaml
+        .get("entrypoints")
+        .and_then(Value::as_mapping)
+        .and_then(|m| m.get(Value::from("default")))
+        .and_then(Value::as_str)
+        .or_else(|| yaml.get("start").and_then(Value::as_str))
+        .expect("entrypoint or start");
+    assert_ne!(default_target, "a");
+
+    let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
+    assert!(nodes.contains_key(&Value::from("a")));
+    assert!(nodes.contains_key(&Value::from("b")));
+    assert!(nodes.contains_key(&Value::from(default_target)));
+
+    let inserted = nodes
+        .get(&Value::from(default_target))
+        .and_then(Value::as_mapping)
+        .unwrap();
+    let routing = inserted
+        .get(Value::from("routing"))
+        .and_then(Value::as_sequence)
+        .unwrap();
+    assert_eq!(routing[0].get("to").and_then(Value::as_str).unwrap(), "a");
+
+    let a_node = nodes
+        .get(&Value::from("a"))
+        .and_then(Value::as_mapping)
+        .unwrap();
+    let a_routing = a_node
+        .get(Value::from("routing"))
+        .and_then(Value::as_sequence)
+        .unwrap();
+    assert_eq!(a_routing[0].get("to").and_then(Value::as_str).unwrap(), "b");
+}
+
+#[test]
+fn add_step_inserts_after_anchor_in_order() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  first:
+    hop: {}
+    routing:
+      - to: second
+  second:
+    hop: {}
+    routing:
+      - to: third
+  third:
+    hop: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("comp.wasm"), b"bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--routing")
+        .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .arg("--after")
+        .arg("second")
+        .assert()
+        .success();
+
+    let content = fs::read_to_string(&flow_path).unwrap();
+    let mut order = Vec::new();
+    for line in content.lines() {
+        if line.starts_with("  ") && !line.starts_with("    ") {
+            if let Some(id) = line[2..].strip_suffix(':') {
+                if !id.starts_with('-') {
+                    order.push(id.to_string());
+                }
+            }
+        }
+    }
+    let inserted = order
+        .iter()
+        .find(|id| id != &"first" && id != &"second" && id != &"third")
+        .expect("inserted node id");
+    assert_eq!(
+        order,
+        vec![
+            "first".to_string(),
+            "second".to_string(),
+            inserted.clone(),
+            "third".to_string()
+        ]
+    );
+}
+
+#[test]
 fn update_metadata_changes_name_only() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");

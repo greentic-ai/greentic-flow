@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -6,8 +7,8 @@ fn default_parameters() -> Value {
     Value::Object(Default::default())
 }
 
-fn default_entrypoints() -> BTreeMap<String, Value> {
-    BTreeMap::new()
+fn default_entrypoints() -> IndexMap<String, Value> {
+    IndexMap::new()
 }
 
 fn default_routing() -> Value {
@@ -32,8 +33,8 @@ pub struct FlowDoc {
     #[serde(default)]
     pub schema_version: Option<u32>,
     #[serde(default = "default_entrypoints")]
-    pub entrypoints: BTreeMap<String, Value>,
-    pub nodes: BTreeMap<String, NodeDoc>,
+    pub entrypoints: IndexMap<String, Value>,
+    pub nodes: IndexMap<String, NodeDoc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -47,7 +48,7 @@ pub struct NodeDoc {
     #[serde(skip_serializing, skip_deserializing, default)]
     pub payload: Value,
     #[serde(flatten, default)]
-    pub raw: BTreeMap<String, Value>,
+    pub raw: IndexMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
