@@ -50,10 +50,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --all-features
-      - name: ygtc-lint --json smoke
+      - name: greentic-flow doctor --json smoke
         run: |
-          cargo build --quiet --bin ygtc-lint
-          ./target/debug/ygtc-lint --json tests/data/flow_ok.ygtc | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data'
+          cargo build --quiet --bin greentic-flow
+          ./target/debug/greentic-flow doctor --json tests/data/flow_ok.ygtc | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data'
       - name: verify published schema $id
         run: |
           url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
