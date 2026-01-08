@@ -31,11 +31,11 @@ jobs:
         run: |
           if [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
             version=$(python - <<'PY'
-import tomllib
-from pathlib import Path
-data = tomllib.loads(Path("Cargo.toml").read_text())
-print(data["package"]["version"])
-PY
+              import tomllib
+              from pathlib import Path
+              data = tomllib.loads(Path("Cargo.toml").read_text())
+              print(data["package"]["version"])
+            PY
             )
             tag="v${version}"
           else
