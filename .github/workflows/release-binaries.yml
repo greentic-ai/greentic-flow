@@ -30,15 +30,19 @@ jobs:
         shell: bash
         run: |
           if [[ "${GITHUB_REF}" == "refs/heads/master" ]]; then
-            tag="master-${GITHUB_RUN_NUMBER}"
-            prerelease=true
+            version=$(python - <<'PY'
+import tomllib
+from pathlib import Path
+data = tomllib.loads(Path("Cargo.toml").read_text())
+print(data["package"]["version"])
+PY
+)
+            tag="v${version}"
           else
             tag="${GITHUB_REF_NAME}"
-            prerelease=false
           fi
           echo "TAG_NAME=${tag}" >> "$GITHUB_ENV"
           echo "TAG_REF=refs/tags/${tag}" >> "$GITHUB_ENV"
-          echo "PRERELEASE=${prerelease}" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -57,7 +61,7 @@ jobs:
         with:
           tag_name: ${{ env.TAG_NAME }}
           name: ${{ env.TAG_NAME }}
-          prerelease: ${{ env.PRERELEASE }}
+          prerelease: false
           draft: false
           body: "Automated release for ${{ env.TAG_NAME }}."
         env:
