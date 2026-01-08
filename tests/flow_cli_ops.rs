@@ -77,6 +77,135 @@ nodes:
 }
 
 #[test]
+fn update_metadata_changes_name_only() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+title: old
+type: messaging
+schema_version: 2
+start: hello
+nodes:
+  hello:
+    op:
+      field: keep
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("update")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--name")
+        .arg("new-name")
+        .assert()
+        .success();
+
+    let yaml = fs::read_to_string(&flow_path).unwrap();
+    assert!(yaml.contains("title: new-name"));
+    assert!(yaml.contains("field: keep"));
+    assert!(yaml.contains("routing: out"));
+}
+
+#[test]
+fn update_type_on_empty_flow_succeeds() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("update")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--type")
+        .arg("events")
+        .assert()
+        .success();
+
+    let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+    assert_eq!(doc.flow_type, "events");
+}
+
+#[test]
+fn update_type_on_non_empty_fails() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+start: hello
+nodes:
+  hello:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("update")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--type")
+        .arg("events")
+        .assert()
+        .failure();
+}
+
+#[test]
+fn update_fails_when_missing_file() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("missing.ygtc");
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("update")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--name")
+        .arg("noop")
+        .assert()
+        .failure();
+}
+
+#[test]
+fn doctor_uses_embedded_schema_by_default() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes: {}
+parameters: {}
+tags: []
+entrypoints: {}
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .success();
+}
+
+#[test]
 fn update_step_preserves_when_no_answers() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");

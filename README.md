@@ -75,6 +75,12 @@ Toggles:
 cargo run --bin greentic-flow -- new flows/demo.ygtc --kind messaging
 ```
 
+For metadata tweaks without rebuilding the flow, use `update` (non-destructive):
+
+```
+cargo run --bin greentic-flow -- update --flow flows/demo.ygtc --name "Demo bot" --tags prod,canary
+```
+
 Flags of note:
 
 - `--kind messaging|events|deployment` controls the template. `--kind deployment`

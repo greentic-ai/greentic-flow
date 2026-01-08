@@ -7,6 +7,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const EMBEDDED_FLOW_SCHEMA: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schemas/ygtc.flow.schema.json"));
+
 use greentic_flow::{
     add_step::{
         AddStepSpec, apply_and_validate,
@@ -33,6 +36,8 @@ struct Cli {
 enum Commands {
     /// Create a new flow skeleton at the given path.
     New(NewArgs),
+    /// Update flow metadata in-place without overwriting nodes.
+    Update(UpdateArgs),
     /// Insert a step after an anchor node.
     AddStep(AddStepArgs),
     /// Update an existing node (rerun config/default with overrides).
@@ -69,10 +74,35 @@ struct NewArgs {
 }
 
 #[derive(Args, Debug)]
+struct UpdateArgs {
+    /// Path to the flow to update.
+    #[arg(long = "flow")]
+    flow_path: PathBuf,
+    /// New flow id (only when safe; see rules).
+    #[arg(long = "id")]
+    flow_id: Option<String>,
+    /// New flow type/kind (only when flow is empty).
+    #[arg(long = "type")]
+    flow_type: Option<String>,
+    /// Optional new schema_version (no auto-bump).
+    #[arg(long = "schema-version")]
+    schema_version: Option<u32>,
+    /// Optional flow name/title.
+    #[arg(long = "name")]
+    name: Option<String>,
+    /// Optional flow description.
+    #[arg(long = "description")]
+    description: Option<String>,
+    /// Optional comma-separated tags.
+    #[arg(long = "tags")]
+    tags: Option<String>,
+}
+
+#[derive(Args, Debug)]
 struct DoctorArgs {
     /// Path to the flow schema JSON file.
-    #[arg(long, default_value = "schemas/ygtc.flow.schema.json")]
-    schema: PathBuf,
+    #[arg(long)]
+    schema: Option<PathBuf>,
     /// Optional adapter catalog used for adapter_resolvable linting.
     #[arg(long)]
     registry: Option<PathBuf>,
@@ -151,6 +181,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::New(args) => handle_new(args),
+        Commands::Update(args) => handle_update(args),
         Commands::AddStep(args) => handle_add_step(args),
         Commands::UpdateStep(args) => handle_update_step(args),
         Commands::DeleteStep(args) => handle_delete_step(args),
@@ -166,9 +197,17 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
         anyhow::bail!("--stdin cannot be combined with file targets");
     }
 
-    let schema_text = fs::read_to_string(&args.schema)
-        .with_context(|| format!("failed to read schema {}", args.schema.display()))?;
-    let schema_label = args.schema.display().to_string();
+    let (schema_text, schema_label, schema_path) = if let Some(schema_path) = &args.schema {
+        let text = fs::read_to_string(schema_path)
+            .with_context(|| format!("failed to read schema {}", schema_path.display()))?;
+        (text, schema_path.display().to_string(), schema_path.clone())
+    } else {
+        (
+            EMBEDDED_FLOW_SCHEMA.to_string(),
+            "embedded ygtc.flow.schema.json".to_string(),
+            PathBuf::from("schemas/ygtc.flow.schema.json"),
+        )
+    };
 
     let registry = if let Some(path) = &args.registry {
         Some(AdapterCatalog::load_from_file(path)?)
@@ -187,7 +226,7 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
             stdin_content,
             &schema_text,
             &schema_label,
-            &args.schema,
+            &schema_path,
             registry.as_ref(),
         );
     }
@@ -198,7 +237,7 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
             target,
             &schema_text,
             &schema_label,
-            &args.schema,
+            &schema_path,
             registry.as_ref(),
             &mut failures,
         )?;
@@ -236,6 +275,60 @@ fn handle_new(args: NewArgs) -> Result<()> {
         args.flow_path.display(),
         args.flow_type
     );
+    Ok(())
+}
+
+fn handle_update(args: UpdateArgs) -> Result<()> {
+    if !args.flow_path.exists() {
+        anyhow::bail!(
+            "flow file {} not found; use `greentic-flow new` to create it",
+            args.flow_path.display()
+        );
+    }
+    let mut doc = load_ygtc_from_path(&args.flow_path)?;
+
+    if let Some(id) = args.flow_id {
+        doc.id = id;
+    }
+
+    if let Some(name) = args.name {
+        doc.title = Some(name);
+    }
+
+    if let Some(desc) = args.description {
+        doc.description = Some(desc);
+    }
+
+    if let Some(tags_raw) = args.tags {
+        let tags = tags_raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        doc.tags = tags;
+    }
+
+    if let Some(schema_version) = args.schema_version {
+        doc.schema_version = Some(schema_version);
+    }
+
+    if let Some(flow_type) = args.flow_type {
+        let is_empty_flow =
+            doc.nodes.is_empty() && doc.entrypoints.is_empty() && doc.start.is_none();
+        if !is_empty_flow {
+            anyhow::bail!(
+                "refusing to change type on a non-empty flow; create a new flow or migrate explicitly"
+            );
+        }
+        doc.flow_type = flow_type;
+    }
+
+    let yaml = serialize_doc(&doc)?;
+    // Validate final doc to catch accidental schema violations.
+    load_ygtc_from_str(&yaml)?;
+    write_flow_file(&args.flow_path, &yaml, true)?;
+    println!("Updated flow metadata at {}", args.flow_path.display());
     Ok(())
 }
 
