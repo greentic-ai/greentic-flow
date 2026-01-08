@@ -36,7 +36,7 @@ from pathlib import Path
 data = tomllib.loads(Path("Cargo.toml").read_text())
 print(data["package"]["version"])
 PY
-)
+            )
             tag="v${version}"
           else
             tag="${GITHUB_REF_NAME}"
