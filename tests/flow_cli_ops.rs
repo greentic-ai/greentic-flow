@@ -1,5 +1,6 @@
 use assert_cmd::prelude::*;
 use greentic_flow::loader::load_ygtc_from_path;
+use serde_json::Value as JsonValue;
 use serde_yaml_bw::Value;
 use std::{fs, path::Path, process::Command};
 use tempfile::tempdir;
@@ -37,6 +38,8 @@ fn new_writes_v2_empty_flow() {
 fn add_step_on_legacy_writes_v2_and_shorthand() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
     fs::write(
         &flow_path,
         r#"id: main
@@ -65,6 +68,8 @@ nodes:
         .arg(r#"{"msg":"hi"}"#)
         .arg("--routing")
         .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
+        .arg("--local-wasm")
+        .arg("comp.wasm")
         .arg("--after")
         .arg("start")
         .arg("--write")
@@ -74,6 +79,118 @@ nodes:
     let yaml = fs::read_to_string(&flow_path).unwrap();
     assert!(!yaml.contains("component.exec"));
     assert!(yaml.contains("routing: out"));
+}
+
+#[test]
+fn add_step_creates_sidecar_local() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--operation")
+        .arg("handle_message")
+        .arg("--payload")
+        .arg(r#"{"msg":"hi"}"#)
+        .arg("--routing")
+        .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .arg("--after")
+        .arg("start")
+        .arg("--write")
+        .assert()
+        .success();
+
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let sidecar: JsonValue =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    let nodes = sidecar.get("nodes").and_then(JsonValue::as_object).unwrap();
+    assert_eq!(nodes.len(), 1);
+    let entry = nodes.values().next().unwrap();
+    assert_eq!(
+        entry
+            .get("source")
+            .and_then(|s| s.get("path"))
+            .and_then(JsonValue::as_str)
+            .unwrap(),
+        "comp.wasm"
+    );
+}
+
+#[test]
+fn add_step_remote_pin_uses_env_digest() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--routing")
+        .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
+        .arg("--component")
+        .arg("oci://example/component:latest")
+        .arg("--pin")
+        .arg("--after")
+        .arg("start")
+        .arg("--write")
+        .env(
+            "GREENTIC_FLOW_TEST_DIGEST",
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .assert()
+        .success();
+
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let sidecar: JsonValue =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    let nodes = sidecar.get("nodes").and_then(JsonValue::as_object).unwrap();
+    let entry = nodes.values().next().unwrap();
+    assert_eq!(
+        entry
+            .get("source")
+            .and_then(|s| s.get("digest"))
+            .and_then(JsonValue::as_str)
+            .unwrap(),
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
 }
 
 #[test]
@@ -182,6 +299,35 @@ fn update_fails_when_missing_file() {
 }
 
 #[test]
+fn update_step_requires_sidecar_mapping() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    op:
+      field: old
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("update-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--step")
+        .arg("hello")
+        .arg("--non-interactive")
+        .assert()
+        .failure();
+}
+
+#[test]
 fn doctor_uses_embedded_schema_by_default() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
@@ -209,6 +355,14 @@ entrypoints: {}
 fn update_step_preserves_when_no_answers() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+        )
+    .unwrap();
     fs::write(
         &flow_path,
         r#"id: main
@@ -258,6 +412,14 @@ nodes:
 fn update_step_overrides_payload_and_routing() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+        )
+    .unwrap();
     fs::write(
         &flow_path,
         r#"id: main
@@ -308,6 +470,14 @@ nodes:
 fn delete_step_splices_single_predecessor() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+    let sidecar = dir.path().join("flow.ygtc.resolve.json");
+    fs::write(
+        &sidecar,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"mid":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
     fs::write(
         &flow_path,
         r#"id: main
@@ -399,6 +569,12 @@ nodes:
 fn delete_step_splice_all_predecessors() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
+    let sidecar = dir.path().join("flow.ygtc.resolve.json");
+    fs::write(
+        &sidecar,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"mid":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
     fs::write(
         &flow_path,
         r#"id: main
@@ -456,4 +632,52 @@ nodes:
             panic!("unexpected routing shape");
         }
     }
+}
+
+#[test]
+fn delete_step_removes_sidecar_mapping() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar = flow_path.with_extension("ygtc.resolve.json");
+    fs::write(
+        &sidecar,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"mid":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  a:
+    hop: {}
+    routing:
+      - to: mid
+  mid:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("delete-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--step")
+        .arg("mid")
+        .arg("--write")
+        .assert()
+        .success();
+
+    let sidecar_json: JsonValue =
+        serde_json::from_str(&fs::read_to_string(&sidecar).unwrap()).unwrap();
+    assert!(
+        !sidecar_json
+            .get("nodes")
+            .and_then(JsonValue::as_object)
+            .unwrap()
+            .contains_key("mid")
+    );
 }

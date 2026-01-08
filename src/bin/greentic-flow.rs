@@ -7,9 +7,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const EMBEDDED_FLOW_SCHEMA: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/schemas/ygtc.flow.schema.json"));
+const EMBEDDED_FLOW_SCHEMA: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/schemas/ygtc.flow.schema.json"
+));
 
+use greentic_distributor_client::DistClient;
 use greentic_flow::{
     add_step::{
         AddStepSpec, apply_and_validate,
@@ -25,6 +28,11 @@ use greentic_flow::{
     loader::{load_ygtc_from_path, load_ygtc_from_str},
     registry::AdapterCatalog,
 };
+use greentic_types::flow_resolve::{
+    ComponentSourceRefV1, FLOW_RESOLVE_SCHEMA_VERSION, FlowResolveV1, NodeResolveV1, ResolveModeV1,
+    read_flow_resolve, sidecar_path_for_flow, write_flow_resolve,
+};
+use sha2::{Digest, Sha256};
 #[derive(Parser, Debug)]
 #[command(name = "greentic-flow", about = "Flow scaffolding helpers")]
 struct Cli {
@@ -46,6 +54,8 @@ enum Commands {
     DeleteStep(DeleteStepArgs),
     /// Validate flows.
     Doctor(DoctorArgs),
+    /// Attach or repair a sidecar component binding without changing flow nodes.
+    BindComponent(BindComponentArgs),
 }
 
 #[derive(Args, Debug)]
@@ -186,6 +196,7 @@ fn main() -> Result<()> {
         Commands::UpdateStep(args) => handle_update_step(args),
         Commands::DeleteStep(args) => handle_delete_step(args),
         Commands::Doctor(args) => handle_doctor(args),
+        Commands::BindComponent(args) => handle_bind_component(args),
     }
 }
 
@@ -635,9 +646,6 @@ struct AddStepArgs {
     /// How to source the node to insert.
     #[arg(long = "mode", value_enum)]
     mode: AddStepMode,
-    /// Component id (default mode).
-    #[arg(long = "component")]
-    component_id: Option<String>,
     /// Optional pack alias for the new node.
     #[arg(long = "pack-alias")]
     pack_alias: Option<String>,
@@ -674,9 +682,47 @@ struct AddStepArgs {
     /// Optional explicit node id hint.
     #[arg(long = "node-id")]
     node_id: Option<String>,
+    /// Remote component reference (oci://, repo://, store://, etc.) for sidecar binding.
+    #[arg(long = "component")]
+    component_ref: Option<String>,
+    /// Local wasm path for sidecar binding (relative to the flow file).
+    #[arg(long = "local-wasm")]
+    local_wasm: Option<PathBuf>,
+    /// Pin the component (resolve tag to digest or hash local wasm).
+    #[arg(long = "pin")]
+    pin: bool,
+}
+
+#[derive(Args, Debug)]
+struct BindComponentArgs {
+    /// Path to the flow file to modify.
+    #[arg(long = "flow")]
+    flow_path: PathBuf,
+    /// Node id to bind.
+    #[arg(long = "step")]
+    step: String,
+    /// Remote component reference (oci://, repo://, store://, etc.).
+    #[arg(long = "component")]
+    component_ref: Option<String>,
+    /// Local wasm path (relative to the flow file).
+    #[arg(long = "local-wasm")]
+    local_wasm: Option<PathBuf>,
+    /// Pin the component (resolve tag to digest or hash local wasm).
+    #[arg(long = "pin")]
+    pin: bool,
+    /// Write back to the sidecar.
+    #[arg(long = "write")]
+    write: bool,
 }
 
 fn handle_add_step(args: AddStepArgs) -> Result<()> {
+    let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
+    let (component_source, resolve_mode) = resolve_component_source_inputs(
+        args.local_wasm.as_ref(),
+        args.component_ref.as_ref(),
+        args.pin,
+        &args.flow_path,
+    )?;
     let doc = load_ygtc_from_path(&args.flow_path)?;
     let flow_ir = FlowIr::from_doc(doc)?;
 
@@ -684,13 +730,11 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
 
     let mode_input = match args.mode {
         AddStepMode::Default => {
-            let operation = args
-                .operation
-                .clone()
-                .or(args.component_id.clone())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("--operation (or --component) is required in default mode")
-                })?;
+            let operation = args.operation.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--operation is required in default mode (component id is not stored in flows)"
+                )
+            })?;
             let payload_json: serde_json::Value =
                 serde_json::from_str(&args.payload).context("parse --payload as JSON")?;
             let routing_json = if let Some(r) = args.routing.as_ref() {
@@ -750,6 +794,7 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
 
     let plan = plan_add_step(&flow_ir, spec, &catalog)
         .map_err(|diags| anyhow::anyhow!("planning failed: {:?}", diags))?;
+    let inserted_id = plan.new_node.id.clone();
     let updated = apply_and_validate(&flow_ir, plan, &catalog, args.allow_cycles)?;
     let updated_doc = updated.to_doc()?;
     let mut output = serde_yaml_bw::to_string(&updated_doc)?;
@@ -767,6 +812,14 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
         fs::write(&tmp_path, &output).with_context(|| format!("write {}", tmp_path.display()))?;
         fs::rename(&tmp_path, &args.flow_path)
             .with_context(|| format!("replace {}", args.flow_path.display()))?;
+        sidecar.nodes.insert(
+            inserted_id.clone(),
+            NodeResolveV1 {
+                source: component_source,
+                mode: resolve_mode,
+            },
+        );
+        write_sidecar(&sidecar_path, &sidecar)?;
         println!(
             "Inserted node after '{}' and wrote {}",
             args.after.unwrap_or_else(|| "<default anchor>".to_string()),
@@ -780,6 +833,14 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
 }
 
 fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
+    let (_sidecar_path, sidecar) = ensure_sidecar(&args.flow_path)?;
+    let sidecar_entry = sidecar.nodes.get(&args.step).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no sidecar mapping for node '{}'; run greentic-flow bind-component or re-add the step with --component/--local-wasm",
+            args.step
+        )
+    })?;
+    let component_payload = load_component_payload(&sidecar_entry.source, &args.flow_path)?;
     let doc = load_ygtc_from_path(&args.flow_path)?;
     let mut flow_ir = FlowIr::from_doc(doc)?;
     let mut node = flow_ir
@@ -789,10 +850,14 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("step '{}' not found", args.step))?;
 
     let answers = parse_answers_inputs(args.answers.as_deref(), args.answers_file.as_deref())?;
+    let mut merged_payload = node.payload.clone();
+    if let Some(component_defaults) = component_payload {
+        merged_payload = merge_payload(merged_payload, Some(component_defaults));
+    }
     let new_payload = if args.mode == "config" || args.mode == "default" {
-        merge_payload(node.payload.clone(), answers)
+        merge_payload(merged_payload, answers)
     } else {
-        node.payload.clone()
+        merged_payload
     };
     let new_operation = args
         .operation
@@ -827,6 +892,7 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
 }
 
 fn handle_delete_step(args: DeleteStepArgs) -> Result<()> {
+    let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
     let doc = load_ygtc_from_path(&args.flow_path)?;
     let mut flow_ir = FlowIr::from_doc(doc)?;
     let target = args.step.clone();
@@ -900,6 +966,8 @@ fn handle_delete_step(args: DeleteStepArgs) -> Result<()> {
     load_ygtc_from_str(&yaml)?;
     if args.write {
         write_flow_file(&args.flow_path, &yaml, true)?;
+        sidecar.nodes.remove(&target);
+        write_sidecar(&sidecar_path, &sidecar)?;
         println!(
             "Deleted step '{}' from {}",
             target,
@@ -907,6 +975,43 @@ fn handle_delete_step(args: DeleteStepArgs) -> Result<()> {
         );
     } else {
         print!("{yaml}");
+    }
+    Ok(())
+}
+
+fn handle_bind_component(args: BindComponentArgs) -> Result<()> {
+    if !args.flow_path.exists() {
+        anyhow::bail!(
+            "flow file {} not found; bind-component requires an existing flow",
+            args.flow_path.display()
+        );
+    }
+    let doc = load_ygtc_from_path(&args.flow_path)?;
+    let flow_ir = FlowIr::from_doc(doc)?;
+    if !flow_ir.nodes.contains_key(&args.step) {
+        anyhow::bail!("node '{}' not found in flow", args.step);
+    }
+    let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
+    let (source, mode) = resolve_component_source_inputs(
+        args.local_wasm.as_ref(),
+        args.component_ref.as_ref(),
+        args.pin,
+        &args.flow_path,
+    )?;
+    sidecar
+        .nodes
+        .insert(args.step.clone(), NodeResolveV1 { source, mode });
+    if args.write {
+        write_sidecar(&sidecar_path, &sidecar)?;
+        println!(
+            "Bound component for node '{}' in {}",
+            args.step,
+            sidecar_path.display()
+        );
+    } else {
+        let mut stdout = io::stdout().lock();
+        serde_json::to_writer_pretty(&mut stdout, &sidecar)?;
+        writeln!(stdout)?;
     }
     Ok(())
 }
@@ -976,4 +1081,213 @@ fn serialize_doc(doc: &greentic_flow::model::FlowDoc) -> Result<String> {
         yaml.push('\n');
     }
     Ok(yaml)
+}
+
+fn ensure_sidecar(flow_path: &Path) -> Result<(PathBuf, FlowResolveV1)> {
+    let sidecar_path = sidecar_path_for_flow(flow_path);
+    if sidecar_path.exists() {
+        let doc = read_flow_resolve(&sidecar_path).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        return Ok((sidecar_path, doc));
+    }
+    let flow_name = flow_path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "flow.ygtc".to_string());
+    let doc = FlowResolveV1 {
+        schema_version: FLOW_RESOLVE_SCHEMA_VERSION,
+        flow: flow_name,
+        nodes: Default::default(),
+    };
+    write_sidecar(&sidecar_path, &doc)?;
+    Ok((sidecar_path, doc))
+}
+
+fn write_sidecar(path: &Path, doc: &FlowResolveV1) -> Result<()> {
+    write_flow_resolve(path, doc).map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+fn classify_remote_source(reference: &str, digest: Option<String>) -> ComponentSourceRefV1 {
+    if reference.starts_with("repo://") {
+        ComponentSourceRefV1::Repo {
+            r#ref: reference.to_string(),
+            digest,
+        }
+    } else if reference.starts_with("store://") {
+        ComponentSourceRefV1::Store {
+            r#ref: reference.to_string(),
+            digest,
+            license_hint: None,
+            meter: None,
+        }
+    } else {
+        ComponentSourceRefV1::Oci {
+            r#ref: reference.to_string(),
+            digest,
+        }
+    }
+}
+
+fn compute_local_digest(path: &Path) -> Result<String> {
+    let data = fs::read(path).with_context(|| format!("read wasm at {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = format!("sha256:{:x}", hasher.finalize());
+    Ok(digest)
+}
+
+fn resolve_remote_digest(reference: &str) -> Result<String> {
+    if let Ok(mock) = std::env::var("GREENTIC_FLOW_TEST_DIGEST")
+        && !mock.is_empty()
+    {
+        return Ok(mock);
+    }
+    let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    let client = DistClient::new(Default::default());
+    let resolved = rt
+        .block_on(client.resolve_ref(reference))
+        .map_err(|e| anyhow::anyhow!("failed to resolve reference {reference}: {e}"))?;
+    Ok(resolved.digest)
+}
+
+fn resolve_component_source_inputs(
+    local_wasm: Option<&PathBuf>,
+    component_ref: Option<&String>,
+    pin: bool,
+    flow_path: &Path,
+) -> Result<(ComponentSourceRefV1, Option<ResolveModeV1>)> {
+    if let Some(local) = local_wasm {
+        if local.is_absolute() {
+            anyhow::bail!("--local-wasm must be a relative path to the flow file");
+        }
+        let digest = if pin {
+            Some(compute_local_digest(
+                &flow_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(local),
+            )?)
+        } else {
+            None
+        };
+        let source = ComponentSourceRefV1::Local {
+            path: local.to_string_lossy().to_string(),
+            digest: digest.clone(),
+        };
+        let mode = digest.as_ref().map(|_| ResolveModeV1::Pinned);
+        return Ok((source, mode));
+    }
+
+    if let Some(reference) = component_ref {
+        let digest = if pin {
+            Some(resolve_remote_digest(reference)?)
+        } else {
+            None
+        };
+        let source = classify_remote_source(reference, digest.clone());
+        let mode = digest.as_ref().map(|_| ResolveModeV1::Pinned);
+        return Ok((source, mode));
+    }
+
+    anyhow::bail!("component source is required; provide --component <ref> or --local-wasm <path>");
+}
+
+fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Path) -> Result<()> {
+    match source {
+        ComponentSourceRefV1::Local { path, .. } => {
+            let abs = flow_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(path);
+            if !abs.exists() {
+                anyhow::bail!(
+                    "local wasm for node missing at {}; rebuild component or update sidecar",
+                    abs.display()
+                );
+            }
+        }
+        ComponentSourceRefV1::Oci { r#ref, digest }
+        | ComponentSourceRefV1::Repo { r#ref, digest }
+        | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
+            let client = DistClient::new(Default::default());
+            let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+            if let Some(d) = digest {
+                rt.block_on(client.fetch_digest(d)).map_err(|e| {
+                    anyhow::anyhow!(
+                        "component digest {} not cached; pull or pin locally first: {e}",
+                        d
+                    )
+                })?;
+            } else {
+                rt.block_on(client.ensure_cached(r#ref)).map_err(|e| {
+                    anyhow::anyhow!(
+                        "component reference {} not available locally; pull or pin digest: {e}",
+                        r#ref
+                    )
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_component_payload(
+    source: &ComponentSourceRefV1,
+    flow_path: &Path,
+) -> Result<Option<serde_json::Value>> {
+    ensure_sidecar_source_available(source, flow_path)?;
+    let manifest_path = match source {
+        ComponentSourceRefV1::Local { path, .. } => flow_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(path)
+            .parent()
+            .map(|p| p.join("component.manifest.json"))
+            .unwrap_or_else(|| {
+                flow_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("component.manifest.json")
+            }),
+        ComponentSourceRefV1::Oci { r#ref, digest }
+        | ComponentSourceRefV1::Repo { r#ref, digest }
+        | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
+            let client = DistClient::new(Default::default());
+            let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+            let artifact = if let Some(d) = digest {
+                rt.block_on(client.fetch_digest(d))
+            } else {
+                rt.block_on(client.ensure_cached(r#ref))
+                    .map(|r| r.cache_path.unwrap_or_default())
+            }
+            .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", r#ref))?;
+            artifact
+                .parent()
+                .map(|p| p.join("component.manifest.json"))
+                .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
+        }
+    };
+
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&text).context("parse manifest JSON for defaults")?;
+    if let Some(props) = json
+        .get("config_schema")
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.as_object())
+    {
+        let mut defaults = serde_json::Map::new();
+        for (k, v) in props {
+            if let Some(def) = v.get("default") {
+                defaults.insert(k.clone(), def.clone());
+            }
+        }
+        if !defaults.is_empty() {
+            return Ok(Some(serde_json::Value::Object(defaults)));
+        }
+    }
+    Ok(None)
 }

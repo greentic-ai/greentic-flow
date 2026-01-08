@@ -81,6 +81,16 @@ For metadata tweaks without rebuilding the flow, use `update` (non-destructive):
 cargo run --bin greentic-flow -- update --flow flows/demo.ygtc --name "Demo bot" --tags prod,canary
 ```
 
+Component bindings live in a sidecar (`<flow>.ygtc.resolve.json`) so the human-authored flow stays component-free. `add-step`, `update-step`, and `delete-step` keep the sidecar in sync; provide `--local-wasm` or `--component` (and optionally `--pin`) when inserting steps.
+
+Use `bind-component` to attach/repair sidecar entries without changing flow content:
+
+```
+cargo run --bin greentic-flow -- bind-component --flow flows/demo.ygtc --step hello --local-wasm target/wasm32-wasip2/release/hello.wasm --pin
+```
+
+`update-step` now uses the sidecar mapping: it requires the mapped component to exist locally (for local wasm) or in the distributor cache (for remote refs). If the mapping is missing or stale, run `bind-component` or re-add the step with `--component/--local-wasm`.
+
 Flags of note:
 
 - `--kind messaging|events|deployment` controls the template. `--kind deployment`
