@@ -2,6 +2,11 @@
 
 Generic schema, loader, and intermediate representation for YGTC flows composed of self-describing component nodes.
 
+## Install
+- From GitHub releases (binstall-friendly archives for Linux x86_64, macOS arm64/x86_64, and Windows x86_64): `cargo binstall greentic-flow`
+- From crates.io (no bundled binaries): `cargo install --locked greentic-flow`
+- Direct download: grab the `.tgz` for your target from the GitHub release tagged `v<version>` and place `greentic-flow` on your `PATH`.
+
 ## Quickstart
 ```rust
 use greentic_flow::{compile_flow, load_and_validate_bundle, resolve::resolve_parameters, loader};

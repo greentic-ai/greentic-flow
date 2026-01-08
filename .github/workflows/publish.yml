@@ -26,7 +26,7 @@ jobs:
           cargo test --workspace --all-features -- --nocapture
 
   publish:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: build-test
     runs-on: ubuntu-latest
     permissions:
@@ -47,3 +47,88 @@ jobs:
           ignore-unpublished-changes: true
           check-repo: true
           dry-run: false
+
+  release:
+    name: Build binaries + Release (binstall-friendly)
+    if: needs.publish.result == 'success'
+    needs: publish
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_suffix: ""
+          - os: macos-15
+            target: x86_64-apple-darwin
+            bin_suffix: ""
+          - os: macos-15
+            target: aarch64-apple-darwin
+            bin_suffix: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_suffix: ".exe"
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Ensure target installed
+        run: rustup target add ${{ matrix.target }}
+      - name: Derive release tag and title from workspace version
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(perl -ne 'print $1 if /^version\s*=\s*"([^"]+)"/' Cargo.toml | head -n 1)
+          if [ -z "${version:-}" ]; then
+            echo "Failed to derive version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_TAG=v${version}" >> "$GITHUB_ENV"
+          echo "RELEASE_TITLE=v${version}" >> "$GITHUB_ENV"
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }} --package greentic-flow --bins
+      - name: Package release archive
+        id: package
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          target="${{ matrix.target }}"
+          bin_suffix="${{ matrix.bin_suffix }}"
+          out_dir="target/${target}/release"
+          archive_dir="dist/greentic-flow-v${version}-${target}"
+          archive="dist/greentic-flow-v${version}-${target}.tgz"
+          checksum="${archive}.sha256"
+
+          mkdir -p "${archive_dir}"
+          cp "${out_dir}/greentic-flow${bin_suffix}" "${archive_dir}/greentic-flow${bin_suffix}"
+          tar -C dist -czf "${archive}" "greentic-flow-v${version}-${target}"
+
+          ARCHIVE="${archive}" python - <<'PY'
+import hashlib, os, pathlib
+path = pathlib.Path(os.environ["ARCHIVE"])
+digest = hashlib.sha256(path.read_bytes()).hexdigest()
+path.with_suffix(path.suffix + ".sha256").write_text(f"{digest}  {path.name}\n")
+PY
+
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+          echo "checksum=${checksum}" >> "$GITHUB_OUTPUT"
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TITLE }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

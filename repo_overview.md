@@ -12,3 +12,4 @@
 - **Schemas:** `schemas/ygtc.flow.schema.json` (flow), `docs/schemas` for reference.
 - **Docs:** `docs/add_step_design.md` (design/behavior), `docs/add_step_audit.md` (older audit), `docs/deployment-flows.md` (deployment-specific notes).
 - **Tests:** `tests/add_step_*` for add-step behavior, `tests/config_flow.rs` for config-flow runner, `tests/manifest_normalization.rs` for manifest upgrades.
+- **Releases:** GitHub Releases on every `master` push bundle `greentic-flow` binaries for Linux x86_64, macOS arm64/x86_64, and Windows x86_64 (binstall-compatible `.tgz` plus SHA256 checksums).
