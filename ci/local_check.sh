@@ -81,16 +81,16 @@ else
   skip_step "cargo test requires cargo"
 fi
 
-step "ygtc-lint --json smoke test"
+step "greentic-flow doctor --json smoke test"
 if ! need python3; then
   skip_step "python3 required for smoke test" 1
-elif ! need cargo && [[ ! -x target/debug/ygtc-lint ]]; then
-  skip_step "cargo required to build ygtc-lint" 1
+elif ! need cargo && [[ ! -x target/debug/greentic-flow ]]; then
+  skip_step "cargo required to build greentic-flow" 1
 else
-  if [[ ! -x target/debug/ygtc-lint ]]; then
-    cargo build --quiet --bin ygtc-lint
+  if [[ ! -x target/debug/greentic-flow ]]; then
+    cargo build --quiet --bin greentic-flow
   fi
-  ./target/debug/ygtc-lint --json tests/data/flow_ok.ygtc | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data'
+  ./target/debug/greentic-flow doctor --json tests/data/flow_ok.ygtc | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data'
 fi
 
 step "Verify published schema \$id"

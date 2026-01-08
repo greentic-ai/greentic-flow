@@ -127,7 +127,7 @@ pub fn flow_error_to_reports(err: FlowError) -> Vec<JsonDiagnostic> {
     }
 }
 
-/// Produce the same JSON emitted by `ygtc-lint --json` for builtin linting.
+/// Produce the same JSON emitted by `greentic-flow doctor --json` for builtin linting.
 pub fn lint_to_stdout_json(ygtc: &str) -> String {
     match load_and_validate_bundle_with_flow(ygtc, None) {
         Ok((bundle, flow)) => {

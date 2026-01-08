@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use indexmap::IndexMap;
-use pathdiff::diff_paths;
-use serde::Serialize;
-use serde_yaml_bw::Value as YamlValue;
 use std::{
+    ffi::OsStr,
     fs,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -16,8 +14,13 @@ use greentic_flow::{
         plan_add_step,
     },
     component_catalog::ManifestCatalog,
+    error::FlowError,
+    flow_bundle::{FlowBundle, load_and_validate_bundle_with_schema_text},
     flow_ir::FlowIr,
-    loader::load_ygtc_from_path,
+    json_output::LintJsonOutput,
+    lint::{lint_builtin_rules, lint_with_registry},
+    loader::{load_ygtc_from_path, load_ygtc_from_str},
+    registry::AdapterCatalog,
 };
 #[derive(Parser, Debug)]
 #[command(name = "greentic-flow", about = "Flow scaffolding helpers")]
@@ -32,83 +35,116 @@ enum Commands {
     New(NewArgs),
     /// Insert a step after an anchor node.
     AddStep(AddStepArgs),
+    /// Update an existing node (rerun config/default with overrides).
+    UpdateStep(UpdateStepArgs),
+    /// Delete a node and optionally splice routing.
+    DeleteStep(DeleteStepArgs),
+    /// Validate flows.
+    Doctor(DoctorArgs),
 }
 
 #[derive(Args, Debug)]
 struct NewArgs {
-    /// Path to write the new flow (e.g., flows/my_flow.ygtc).
-    #[arg(value_name = "PATH")]
-    path: PathBuf,
-    /// Flow kind: messaging, events, or deployment (deployment is sugar for events).
-    #[arg(long, value_enum)]
-    kind: Option<FlowKind>,
-    /// Alias for --kind deployment.
-    #[arg(long)]
-    deployment: bool,
-    /// Flow identifier; defaults to the file stem.
+    /// Path to write the new flow.
+    #[arg(long = "flow")]
+    flow_path: PathBuf,
+    /// Flow identifier.
     #[arg(long = "id")]
-    flow_id: Option<String>,
-    /// Optional flow description shown at the top of the file.
-    #[arg(long)]
+    flow_id: String,
+    /// Flow type/kind (e.g., messaging, events, component-config).
+    #[arg(long = "type")]
+    flow_type: String,
+    /// schema_version to write (default 2).
+    #[arg(long = "schema-version", default_value_t = 2)]
+    schema_version: u32,
+    /// Optional flow name/title.
+    #[arg(long = "name")]
+    name: Option<String>,
+    /// Optional flow description.
+    #[arg(long = "description")]
     description: Option<String>,
     /// Overwrite the file if it already exists.
     #[arg(long)]
     force: bool,
-    /// Optional manifest path for detecting pack.kind (defaults to ./manifest.yaml if present).
-    #[arg(long = "pack-manifest")]
-    manifest_path: Option<PathBuf>,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum FlowKind {
-    Messaging,
-    Events,
-    Deployment,
+#[derive(Args, Debug)]
+struct DoctorArgs {
+    /// Path to the flow schema JSON file.
+    #[arg(long, default_value = "schemas/ygtc.flow.schema.json")]
+    schema: PathBuf,
+    /// Optional adapter catalog used for adapter_resolvable linting.
+    #[arg(long)]
+    registry: Option<PathBuf>,
+    /// Emit a machine-readable JSON payload describing the lint result for a single flow.
+    #[arg(long)]
+    json: bool,
+    /// Read flow YAML from stdin (requires --json).
+    #[arg(long)]
+    stdin: bool,
+    /// Flow files or directories to lint.
+    #[arg(required_unless_present = "stdin")]
+    targets: Vec<PathBuf>,
 }
 
-impl FlowKind {
-    fn effective_flow_type(self) -> &'static str {
-        match self {
-            FlowKind::Messaging => "messaging",
-            FlowKind::Events | FlowKind::Deployment => "events",
-        }
-    }
-
-    fn default_description(self) -> &'static str {
-        match self {
-            FlowKind::Messaging => "Describe what this messaging flow should accomplish.",
-            FlowKind::Events => "Describe the event trigger and the action performed.",
-            FlowKind::Deployment => {
-                "Render infrastructure-as-code artifacts for the current DeploymentPlan."
-            }
-        }
-    }
+#[derive(Args, Debug)]
+struct UpdateStepArgs {
+    /// Flow file to update.
+    #[arg(long = "flow")]
+    flow_path: PathBuf,
+    /// Node id to update.
+    #[arg(long = "step")]
+    step: String,
+    /// Mode: config (default) or default.
+    #[arg(long = "mode", default_value = "config", value_parser = ["config", "default"])]
+    mode: String,
+    /// Optional new operation name (defaults to existing op key).
+    #[arg(long = "operation")]
+    operation: Option<String>,
+    /// Optional routing override: out|reply or JSON array.
+    #[arg(long = "routing")]
+    routing: Option<String>,
+    /// Answers JSON/YAML string to merge with existing payload.
+    #[arg(long = "answers")]
+    answers: Option<String>,
+    /// Answers file (JSON/YAML) to merge with existing payload.
+    #[arg(long = "answers-file")]
+    answers_file: Option<PathBuf>,
+    /// Non-interactive mode (merge answers/prefill; fail if required missing).
+    #[arg(long = "non-interactive")]
+    non_interactive: bool,
+    /// Optional explicit component id (not yet used; reserved for future resolution).
+    #[arg(long = "component")]
+    component: Option<String>,
+    /// Write back to the flow file instead of stdout.
+    #[arg(long = "write")]
+    write: bool,
 }
 
-#[derive(Serialize)]
-struct FlowScaffold {
-    id: String,
-    #[serde(rename = "type")]
-    flow_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    nodes: IndexMap<String, NodeTemplate>,
-}
-
-#[derive(Serialize)]
-struct NodeTemplate {
-    #[serde(flatten)]
-    component: IndexMap<String, YamlValue>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    routing: Option<Vec<RouteTemplate>>,
-}
-
-#[derive(Serialize)]
-struct RouteTemplate {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    to: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    out: Option<bool>,
+#[derive(Args, Debug, Clone)]
+struct DeleteStepArgs {
+    /// Flow file to update.
+    #[arg(long = "flow")]
+    flow_path: PathBuf,
+    /// Node id to delete.
+    #[arg(long = "step")]
+    step: String,
+    /// Strategy: splice (default) or remove-only.
+    #[arg(long = "strategy", default_value = "splice", value_parser = ["splice", "remove-only"])]
+    strategy: String,
+    /// Behavior when multiple predecessors are present.
+    #[arg(
+        long = "if-multiple-predecessors",
+        default_value = "error",
+        value_parser = ["error", "splice-all"]
+    )]
+    multi_pred: String,
+    /// Skip confirmation prompt.
+    #[arg(long = "assume-yes")]
+    assume_yes: bool,
+    /// Write back to the flow file instead of stdout.
+    #[arg(long = "write")]
+    write: bool,
 }
 
 fn main() -> Result<()> {
@@ -116,64 +152,283 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::New(args) => handle_new(args),
         Commands::AddStep(args) => handle_add_step(args),
+        Commands::UpdateStep(args) => handle_update_step(args),
+        Commands::DeleteStep(args) => handle_delete_step(args),
+        Commands::Doctor(args) => handle_doctor(args),
     }
 }
 
-fn handle_new(mut args: NewArgs) -> Result<()> {
-    let mut manifest = load_manifest(args.manifest_path.as_deref())?;
-    if args.deployment {
-        args.kind = Some(FlowKind::Deployment);
+fn handle_doctor(args: DoctorArgs) -> Result<()> {
+    if args.stdin && !args.json {
+        anyhow::bail!("--stdin currently requires --json");
+    }
+    if args.stdin && !args.targets.is_empty() {
+        anyhow::bail!("--stdin cannot be combined with file targets");
     }
 
-    let manifest_kind = manifest.as_ref().and_then(|info| info.kind_lower());
+    let schema_text = fs::read_to_string(&args.schema)
+        .with_context(|| format!("failed to read schema {}", args.schema.display()))?;
+    let schema_label = args.schema.display().to_string();
 
-    let flow_kind = args
-        .kind
-        .or(match manifest_kind.as_deref() {
-            Some("deployment") => Some(FlowKind::Deployment),
-            Some("events") => Some(FlowKind::Events),
-            _ => None,
-        })
-        .unwrap_or(FlowKind::Messaging);
+    let registry = if let Some(path) = &args.registry {
+        Some(AdapterCatalog::load_from_file(path)?)
+    } else {
+        None
+    };
 
-    let id = args
-        .flow_id
-        .or_else(|| derive_id_from_path(&args.path))
-        .unwrap_or_else(|| "new_flow".to_string());
-
-    let description = args
-        .description
-        .filter(|d| !d.trim().is_empty())
-        .map(|d| d.trim().to_string())
-        .unwrap_or_else(|| flow_kind.default_description().to_string());
-
-    let should_warn = manifest_kind.as_deref() == Some("deployment")
-        && flow_kind.effective_flow_type() != "events";
-
-    let yaml = render_flow_yaml(&id, &description, flow_kind)?;
-
-    write_flow_file(&args.path, &yaml, args.force)?;
-
-    println!(
-        "Created {} flow '{}' at {}",
-        flow_kind.effective_flow_type(),
-        id,
-        args.path.display()
-    );
-
-    if should_warn {
-        eprintln!(
-            "info: pack is marked kind: deployment but flow '{}' uses type: {}",
-            id,
-            flow_kind.effective_flow_type()
+    if args.json {
+        let stdin_content = if args.stdin {
+            Some(read_stdin_flow()?)
+        } else {
+            None
+        };
+        return run_json(
+            &args.targets,
+            stdin_content,
+            &schema_text,
+            &schema_label,
+            &args.schema,
+            registry.as_ref(),
         );
     }
 
-    if let Some(manifest) = manifest.as_mut() {
-        register_flow_in_manifest(manifest, &id, &args.path)?;
+    let mut failures = 0usize;
+    for target in &args.targets {
+        lint_path(
+            target,
+            &schema_text,
+            &schema_label,
+            &args.schema,
+            registry.as_ref(),
+            &mut failures,
+        )?;
     }
 
+    if failures == 0 {
+        println!("All flows valid");
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("{failures} flow(s) failed validation"))
+    }
+}
+
+fn handle_new(args: NewArgs) -> Result<()> {
+    let doc = greentic_flow::model::FlowDoc {
+        id: args.flow_id.clone(),
+        title: args.name,
+        description: args.description,
+        flow_type: args.flow_type.clone(),
+        start: None,
+        parameters: serde_json::Value::Object(Default::default()),
+        tags: Vec::new(),
+        schema_version: Some(args.schema_version),
+        entrypoints: std::collections::BTreeMap::new(),
+        nodes: std::collections::BTreeMap::new(),
+    };
+    let mut yaml = serde_yaml_bw::to_string(&doc)?;
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    write_flow_file(&args.flow_path, &yaml, args.force)?;
+    println!(
+        "Created flow '{}' at {} (type: {})",
+        args.flow_id,
+        args.flow_path.display(),
+        args.flow_type
+    );
     Ok(())
+}
+
+fn lint_path(
+    path: &Path,
+    schema_text: &str,
+    schema_label: &str,
+    schema_path: &Path,
+    registry: Option<&AdapterCatalog>,
+    failures: &mut usize,
+) -> Result<()> {
+    if path.is_file() {
+        lint_file(
+            path,
+            schema_text,
+            schema_label,
+            schema_path,
+            registry,
+            failures,
+        )?;
+    } else if path.is_dir() {
+        let entries = fs::read_dir(path)
+            .with_context(|| format!("failed to read directory {}", path.display()))?;
+        for entry in entries {
+            let entry = entry
+                .with_context(|| format!("failed to read directory entry in {}", path.display()))?;
+            lint_path(
+                &entry.path(),
+                schema_text,
+                schema_label,
+                schema_path,
+                registry,
+                failures,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn lint_file(
+    path: &Path,
+    schema_text: &str,
+    schema_label: &str,
+    schema_path: &Path,
+    registry: Option<&AdapterCatalog>,
+    failures: &mut usize,
+) -> Result<()> {
+    if path.extension() != Some(OsStr::new("ygtc")) {
+        return Ok(());
+    }
+
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+
+    match lint_flow(
+        &content,
+        Some(path),
+        schema_text,
+        schema_label,
+        schema_path,
+        registry,
+    ) {
+        Ok(result) => {
+            if result.lint_errors.is_empty() {
+                println!("OK  {} ({})", path.display(), result.bundle.id);
+            } else {
+                *failures += 1;
+                eprintln!("ERR {}:", path.display());
+                for err in result.lint_errors {
+                    eprintln!("  {err}");
+                }
+            }
+        }
+        Err(err) => {
+            *failures += 1;
+            eprintln!("ERR {}: {err}", path.display());
+        }
+    }
+    Ok(())
+}
+
+struct LintResult {
+    bundle: FlowBundle,
+    lint_errors: Vec<String>,
+}
+
+#[allow(clippy::result_large_err)]
+fn lint_flow(
+    content: &str,
+    source_path: Option<&Path>,
+    schema_text: &str,
+    schema_label: &str,
+    schema_path: &Path,
+    registry: Option<&AdapterCatalog>,
+) -> Result<LintResult, FlowError> {
+    let (bundle, flow) = load_and_validate_bundle_with_schema_text(
+        content,
+        schema_text,
+        schema_label.to_string(),
+        Some(schema_path),
+        source_path,
+    )?;
+    let lint_errors = if let Some(cat) = registry {
+        lint_with_registry(&flow, cat)
+    } else {
+        lint_builtin_rules(&flow)
+    };
+    Ok(LintResult {
+        bundle,
+        lint_errors,
+    })
+}
+
+fn run_json(
+    targets: &[PathBuf],
+    stdin_content: Option<String>,
+    schema_text: &str,
+    schema_label: &str,
+    schema_path: &Path,
+    registry: Option<&AdapterCatalog>,
+) -> Result<()> {
+    let (content, source_display, source_path) = if let Some(stdin_flow) = stdin_content {
+        (
+            stdin_flow,
+            "<stdin>".to_string(),
+            Some(Path::new("<stdin>")),
+        )
+    } else {
+        if targets.len() != 1 {
+            anyhow::bail!("--json mode expects exactly one target file");
+        }
+        let target = &targets[0];
+        if target.is_dir() {
+            anyhow::bail!(
+                "--json target must be a file, found directory {}",
+                target.display()
+            );
+        }
+        if target.extension() != Some(OsStr::new("ygtc")) {
+            anyhow::bail!("--json target must be a .ygtc file");
+        }
+        let content = fs::read_to_string(target)
+            .with_context(|| format!("failed to read {}", target.display()))?;
+        (
+            content,
+            target.display().to_string(),
+            Some(target.as_path()),
+        )
+    };
+
+    let output = match lint_flow(
+        &content,
+        source_path,
+        schema_text,
+        schema_label,
+        schema_path,
+        registry,
+    ) {
+        Ok(result) => {
+            if result.lint_errors.is_empty() {
+                LintJsonOutput::success(result.bundle)
+            } else {
+                LintJsonOutput::lint_failure(result.lint_errors, Some(source_display.clone()))
+            }
+        }
+        Err(err) => LintJsonOutput::error(err),
+    };
+
+    let ok = output.ok;
+    let line = output.into_string();
+    write_stdout_line(&line)?;
+    if ok {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("validation failed"))
+    }
+}
+
+fn read_stdin_flow() -> Result<String> {
+    let mut buf = String::new();
+    io::stdin()
+        .read_to_string(&mut buf)
+        .context("failed to read flow YAML from stdin")?;
+    Ok(buf)
+}
+
+fn write_stdout_line(line: &str) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    match writeln!(stdout, "{line}") {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
@@ -226,36 +481,6 @@ fn write_flow_file(path: &Path, content: &str, force: bool) -> Result<()> {
 
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
-}
-
-fn derive_id_from_path(path: &Path) -> Option<String> {
-    let stem = path.file_stem()?.to_string_lossy();
-    if stem.trim().is_empty() {
-        None
-    } else {
-        Some(stem.replace(' ', "_"))
-    }
-}
-
-fn render_flow_yaml(id: &str, description: &str, kind: FlowKind) -> Result<String> {
-    let nodes = match kind {
-        FlowKind::Messaging => messaging_nodes(),
-        FlowKind::Events => events_nodes(),
-        FlowKind::Deployment => deployment_nodes(),
-    };
-
-    let scaffold = FlowScaffold {
-        id: id.to_string(),
-        flow_type: kind.effective_flow_type().to_string(),
-        description: Some(description.to_string()),
-        nodes,
-    };
-
-    let mut yaml = serde_yaml_bw::to_string(&scaffold)?;
-    if !yaml.ends_with('\n') {
-        yaml.push('\n');
-    }
-    Ok(yaml)
 }
 
 fn resolve_config_flow(
@@ -376,7 +601,14 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
             let payload_json: serde_json::Value =
                 serde_json::from_str(&args.payload).context("parse --payload as JSON")?;
             let routing_json = if let Some(r) = args.routing.as_ref() {
-                Some(serde_json::from_str(r).context("parse --routing as JSON array of routes")?)
+                if r == "out" || r == "reply" {
+                    Some(serde_json::Value::String(r.clone()))
+                } else {
+                    Some(
+                        serde_json::from_str(r)
+                            .context("parse --routing as JSON array of routes")?,
+                    )
+                }
             } else {
                 None
             };
@@ -454,213 +686,201 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
     Ok(())
 }
 
-fn messaging_nodes() -> IndexMap<String, NodeTemplate> {
-    let mut nodes = IndexMap::new();
-    nodes.insert(
-        "entry".to_string(),
-        node_template(
-            "component.kind.entry",
-            serde_yaml_bw::to_value(indexmap::indexmap! {
-                "prompt".to_string() => YamlValue::from("Start conversation or ask the first question."),
-            })
-            .unwrap(),
-            Some(vec![route_to("step2")]),
-        ),
-    );
-    nodes.insert(
-        "step2".to_string(),
-        node_template(
-            "component.kind.action",
-            serde_yaml_bw::to_value(indexmap::indexmap! {
-                "note".to_string() => YamlValue::from("Call APIs or other components needed for the conversation."),
-            })
-            .unwrap(),
-            Some(vec![route_out()]),
-        ),
-    );
-    nodes
-}
+fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
+    let doc = load_ygtc_from_path(&args.flow_path)?;
+    let mut flow_ir = FlowIr::from_doc(doc)?;
+    let mut node = flow_ir
+        .nodes
+        .get(&args.step)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("step '{}' not found", args.step))?;
 
-fn events_nodes() -> IndexMap<String, NodeTemplate> {
-    let mut nodes = IndexMap::new();
-    nodes.insert(
-        "transform".to_string(),
-        node_template(
-            "component.kind.transform",
-            serde_yaml_bw::to_value(indexmap::indexmap! {
-                "note".to_string() => YamlValue::from("Map the inbound payload to whatever the next node expects."),
-            })
-            .unwrap(),
-            Some(vec![route_to("action")]),
-        ),
-    );
-    nodes.insert(
-        "action".to_string(),
-        node_template(
-            "component.kind.action",
-            serde_yaml_bw::to_value(indexmap::indexmap! {
-                "config".to_string() => YamlValue::Mapping(Default::default()),
-            })
-            .unwrap(),
-            Some(vec![route_out()]),
-        ),
-    );
-    nodes
-}
-
-fn deployment_nodes() -> IndexMap<String, NodeTemplate> {
-    let mut nodes = IndexMap::new();
-    nodes.insert(
-        "render".to_string(),
-        node_template(
-            "deploy.renderer",
-            serde_yaml_bw::to_value(indexmap::indexmap! {
-                "component".to_string() => YamlValue::from("your.deployment.component"),
-                "profile".to_string() => YamlValue::from("iac-generator"),
-                "config".to_string() => YamlValue::Mapping(Default::default()),
-                "note".to_string() => YamlValue::from("Access the DeploymentPlan via greentic:deploy-plan@1.0.0."),
-            })
-            .unwrap(),
-            Some(vec![route_to("done")]),
-        ),
-    );
-    nodes.insert(
-        "done".to_string(),
-        node_template(
-            "noop",
-            serde_yaml_bw::to_value(indexmap::indexmap! {
-                "config".to_string() => YamlValue::Mapping(Default::default()),
-            })
-            .unwrap(),
-            Some(vec![route_out()]),
-        ),
-    );
-    nodes
-}
-
-fn node_template(
-    component_kind: &str,
-    config: YamlValue,
-    routing: Option<Vec<RouteTemplate>>,
-) -> NodeTemplate {
-    let mut component = IndexMap::new();
-    component.insert(component_kind.to_string(), config);
-    NodeTemplate { component, routing }
-}
-
-fn route_to(target: &str) -> RouteTemplate {
-    RouteTemplate {
-        to: Some(target.to_string()),
-        out: None,
-    }
-}
-
-fn route_out() -> RouteTemplate {
-    RouteTemplate {
-        to: None,
-        out: Some(true),
-    }
-}
-
-struct ManifestInfo {
-    path: PathBuf,
-    value: serde_yaml_bw::Value,
-}
-
-impl ManifestInfo {
-    fn kind_lower(&self) -> Option<String> {
-        self.value
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_ascii_lowercase())
-    }
-}
-
-fn load_manifest(path: Option<&Path>) -> Result<Option<ManifestInfo>> {
-    let (manifest_path, explicit) = if let Some(p) = path {
-        (p.to_path_buf(), true)
+    let answers = parse_answers_inputs(args.answers.as_deref(), args.answers_file.as_deref())?;
+    let new_payload = if args.mode == "config" || args.mode == "default" {
+        merge_payload(node.payload.clone(), answers)
     } else {
-        let default = PathBuf::from("manifest.yaml");
-        if default.exists() {
-            (default, false)
-        } else {
-            return Ok(None);
-        }
+        node.payload.clone()
+    };
+    let new_operation = args
+        .operation
+        .clone()
+        .unwrap_or_else(|| node.operation.clone());
+    let new_routing = if let Some(r) = args.routing.as_ref() {
+        parse_routing_arg(r)?
+    } else {
+        node.routing.clone()
     };
 
-    if !manifest_path.exists() {
-        if explicit {
-            anyhow::bail!(
-                "manifest file {} not found (required by --pack-manifest)",
-                manifest_path.display()
-            );
-        }
-        return Ok(None);
-    }
+    node.operation = new_operation;
+    node.payload = new_payload;
+    node.routing = new_routing;
+    flow_ir.nodes.insert(args.step.clone(), node);
 
-    let contents = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
-    let value: serde_yaml_bw::Value =
-        serde_yaml_bw::from_str(&contents).with_context(|| "failed to parse manifest")?;
-    Ok(Some(ManifestInfo {
-        path: manifest_path,
-        value,
-    }))
+    let doc_out = flow_ir.to_doc()?;
+    // Adjust entrypoint if it targeted the removed node in other ops; here node stays, so no-op.
+    let yaml = serialize_doc(&doc_out)?;
+    load_ygtc_from_str(&yaml)?; // schema validation
+    if args.write {
+        write_flow_file(&args.flow_path, &yaml, true)?;
+        println!(
+            "Updated step '{}' in {}",
+            args.step,
+            args.flow_path.display()
+        );
+    } else {
+        print!("{yaml}");
+    }
+    Ok(())
 }
 
-fn register_flow_in_manifest(
-    manifest: &mut ManifestInfo,
-    id: &str,
-    flow_path: &Path,
-) -> Result<()> {
-    use serde_yaml_bw::{Mapping, Sequence, Value};
+fn handle_delete_step(args: DeleteStepArgs) -> Result<()> {
+    let doc = load_ygtc_from_path(&args.flow_path)?;
+    let mut flow_ir = FlowIr::from_doc(doc)?;
+    let target = args.step.clone();
+    let target_node = flow_ir
+        .nodes
+        .get(&target)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("step '{}' not found", target))?;
 
-    let root = manifest.value.as_mapping_mut().ok_or_else(|| {
-        anyhow::anyhow!(
-            "manifest {} must be a YAML mapping",
-            manifest.path.display()
-        )
-    })?;
-
-    let flows_value = root
-        .entry(Value::from("flows"))
-        .or_insert_with(|| Value::Sequence(Sequence::new()));
-
-    let flows = flows_value.as_sequence_mut().ok_or_else(|| {
-        anyhow::anyhow!(
-            "manifest {} has non-sequence flows",
-            manifest.path.display()
-        )
-    })?;
-
-    let already_present = flows.iter().any(|entry| match entry {
-        Value::Mapping(map) => map
-            .get(Value::from("id"))
-            .and_then(|v| v.as_str())
-            .map(|existing| existing == id)
-            .unwrap_or(false),
-        _ => false,
-    });
-
-    if already_present {
-        return Ok(());
+    let mut predecessors = Vec::new();
+    for (id, node) in &flow_ir.nodes {
+        if node
+            .routing
+            .iter()
+            .any(|r| r.to.as_deref() == Some(target.as_str()))
+        {
+            predecessors.push(id.clone());
+        }
     }
 
-    let manifest_dir = manifest
-        .path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let rel = diff_paths(flow_path, &manifest_dir).unwrap_or_else(|| flow_path.to_path_buf());
-    let rel_string = rel.to_string_lossy().replace('\\', "/");
+    if predecessors.len() > 1 && args.multi_pred == "error" {
+        anyhow::bail!(
+            "multiple predecessors for '{}': {} (use --if-multiple-predecessors splice-all)",
+            target,
+            predecessors.join(", ")
+        );
+    }
 
-    let mut entry = Mapping::new();
-    entry.insert(Value::from("id"), Value::from(id.to_string()));
-    entry.insert(Value::from("file"), Value::from(rel_string));
-    flows.push(Value::Mapping(entry));
+    if args.strategy == "splice" {
+        for pred_id in predecessors {
+            if let Some(pred) = flow_ir.nodes.get_mut(&pred_id) {
+                let mut new_routes = Vec::new();
+                for route in &pred.routing {
+                    if route.to.as_deref() == Some(target.as_str()) {
+                        if target_node.routing.is_empty()
+                            || target_node
+                                .routing
+                                .iter()
+                                .all(|r| r.to.is_none() && (r.out || r.reply))
+                        {
+                            // drop this edge; terminal target
+                            continue;
+                        } else {
+                            new_routes.extend(target_node.routing.clone());
+                            continue;
+                        }
+                    }
+                    new_routes.push(route.clone());
+                }
+                pred.routing = new_routes;
+            }
+        }
+    }
 
-    let serialized = serde_yaml_bw::to_string(&manifest.value)?;
-    fs::write(&manifest.path, serialized)
-        .with_context(|| format!("failed to write {}", manifest.path.display()))?;
+    flow_ir.nodes.swap_remove(&target);
+    // Fix entrypoint if it pointed to deleted node.
+    let mut new_entrypoints = flow_ir.entrypoints.clone();
+    for (_, v) in new_entrypoints.iter_mut() {
+        if v == &target {
+            if let Some(first) = flow_ir.nodes.keys().next() {
+                *v = first.clone();
+            } else {
+                *v = String::new();
+            }
+        }
+    }
+    flow_ir.entrypoints = new_entrypoints;
+
+    let doc_out = flow_ir.to_doc()?;
+    let yaml = serialize_doc(&doc_out)?;
+    load_ygtc_from_str(&yaml)?;
+    if args.write {
+        write_flow_file(&args.flow_path, &yaml, true)?;
+        println!(
+            "Deleted step '{}' from {}",
+            target,
+            args.flow_path.display()
+        );
+    } else {
+        print!("{yaml}");
+    }
     Ok(())
+}
+
+fn parse_answers_inputs(
+    answers: Option<&str>,
+    answers_file: Option<&Path>,
+) -> Result<Option<serde_json::Value>> {
+    let mut merged: Option<serde_json::Value> = None;
+    if let Some(text) = answers {
+        let parsed: serde_json::Value = serde_yaml_bw::from_str(text)
+            .or_else(|_| serde_json::from_str(text))
+            .context("parse --answers as JSON/YAML")?;
+        merged = Some(merge_payload(
+            merged.unwrap_or(serde_json::Value::Null),
+            Some(parsed),
+        ));
+    }
+    if let Some(path) = answers_file {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("read answers file {}", path.display()))?;
+        let parsed: serde_json::Value = serde_yaml_bw::from_str(&text)
+            .or_else(|_| serde_json::from_str(&text))
+            .context("parse answers file as JSON/YAML")?;
+        merged = Some(merge_payload(
+            merged.unwrap_or(serde_json::Value::Null),
+            Some(parsed),
+        ));
+    }
+    Ok(merged)
+}
+
+fn merge_payload(base: serde_json::Value, overlay: Option<serde_json::Value>) -> serde_json::Value {
+    let Some(overlay) = overlay else { return base };
+    match (base, overlay) {
+        (serde_json::Value::Object(mut b), serde_json::Value::Object(o)) => {
+            for (k, v) in o {
+                b.insert(k, v);
+            }
+            serde_json::Value::Object(b)
+        }
+        (_, other) => other,
+    }
+}
+
+fn parse_routing_arg(raw: &str) -> Result<Vec<greentic_flow::flow_ir::Route>> {
+    if raw == "out" {
+        return Ok(vec![greentic_flow::flow_ir::Route {
+            out: true,
+            ..Default::default()
+        }]);
+    }
+    if raw == "reply" {
+        return Ok(vec![greentic_flow::flow_ir::Route {
+            reply: true,
+            ..Default::default()
+        }]);
+    }
+    let routes: Vec<greentic_flow::flow_ir::Route> =
+        serde_json::from_str(raw).context("parse --routing as JSON array or shorthand string")?;
+    Ok(routes)
+}
+
+fn serialize_doc(doc: &greentic_flow::model::FlowDoc) -> Result<String> {
+    let mut yaml = serde_yaml_bw::to_string(doc)?;
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    Ok(yaml)
 }

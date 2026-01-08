@@ -235,6 +235,21 @@ fn extract_operation(node: &NodeDoc, node_id: &str) -> Result<(String, Value)> {
         "annotations",
         "meta",
     ];
+    if let Some(exec) = node.raw.get("component.exec") {
+        let op = node
+            .raw
+            .get("operation")
+            .and_then(Value::as_str)
+            .or(node.operation.as_deref())
+            .unwrap_or("");
+        if op.trim().is_empty() {
+            return Err(FlowError::Internal {
+                message: format!("node '{node_id}' missing operation key"),
+                location: FlowErrorLocation::at_path(format!("nodes.{node_id}")),
+            });
+        }
+        return Ok((op.to_string(), exec.clone()));
+    }
     let mut op_key: Option<String> = None;
     let mut payload: Option<Value> = None;
     for (k, v) in &node.raw {

@@ -87,18 +87,18 @@ Flags of note:
 
 Running the command writes a ready-to-edit `.ygtc` file and reports any hints.
 
-### Flow linting
+### Flow linting (doctor)
 
-Run `cargo run --bin ygtc-lint -- <paths>` to validate flows. Example:
+Run `greentic-flow doctor` to validate flows. Example:
 
 ```
-cargo run --bin ygtc-lint -- fixtures --schema schemas/ygtc.flow.schema.json
+cargo run --bin greentic-flow -- doctor fixtures --schema schemas/ygtc.flow.schema.json
 ```
 
 To enable adapter linting, provide `--registry`:
 
 ```
-cargo run --bin ygtc-lint -- \
+cargo run --bin greentic-flow -- doctor \
   --schema schemas/ygtc.flow.schema.json \
   --registry tests/data/registry_ok.json \
   tests/data/flow_ok.ygtc
@@ -108,23 +108,31 @@ For machine-readable CI, use `--json`; the command exits non-zero on any error a
 prints the validated bundle plus diagnostics:
 
 ```
-cargo run --quiet --bin ygtc-lint -- --json tests/data/flow_ok.ygtc
+cargo run --quiet --bin greentic-flow -- doctor --json tests/data/flow_ok.ygtc
 # { "ok": true, "bundle": { "id": "flow_ok", ... } }
 ```
 
 Pipelines can also stream flows via stdin:
 
 ```
-cat tests/data/flow_ok.ygtc | cargo run --quiet --bin ygtc-lint -- --json --stdin
+cat tests/data/flow_ok.ygtc | cargo run --quiet --bin greentic-flow -- doctor --json --stdin
 ```
 
 And in CI you can assert the BLAKE3 hash is present:
 
 ```
-ygtc-lint --json --stdin < flow.ygtc | jq -e '.ok and .hash_blake3 != null'
+greentic-flow doctor --json --stdin < flow.ygtc | jq -e '.ok and .hash_blake3 != null'
 ```
 
 The CLI recursively walks any directories provided, only inspecting files with a `.ygtc` extension. Schema validation always runs; adapter checks are additive when a registry is supplied.
+
+### CLI commands
+
+- `greentic-flow new --flow <path> --id <id> --type <type> [--schema-version 2] [--name ...] [--description ...]` — write an empty v2 flow skeleton.
+- `greentic-flow add-step ...` — insert a node after an anchor; accepts legacy input but always writes v2 (routing shorthand respected).
+- `greentic-flow update-step --flow <path> --step <node> [--answers ...] [--routing ...] [--operation ...] [--write]` — update an existing node payload/routing with optional overrides.
+- `greentic-flow delete-step --flow <path> --step <node> [--strategy splice|remove-only] [--if-multiple-predecessors error|splice-all] [--write]` — remove a node and optionally splice routing.
+- `greentic-flow doctor ...` — validate flows (schema + optional adapter registry).
 
 The shared flow schema is published from this repository at
 `https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json`

@@ -3,8 +3,9 @@ use serde_json::Value;
 
 #[test]
 fn json_mode_emits_bundle() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ygtc-lint"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"));
     let assert = cmd
+        .arg("doctor")
         .arg("--json")
         .arg("fixtures/weather_bot.ygtc")
         .assert()
@@ -18,8 +19,9 @@ fn json_mode_emits_bundle() {
 
 #[test]
 fn json_mode_reports_schema_errors() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ygtc-lint"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"));
     let assert = cmd
+        .arg("doctor")
         .arg("--json")
         .arg("tests/data/flow_missing_type.ygtc")
         .assert()
@@ -34,8 +36,9 @@ fn json_mode_reports_schema_errors() {
 #[test]
 fn json_mode_stdin_reports_schema_pointer() {
     let stdin_flow = std::fs::read_to_string("tests/data/flow_missing_type.ygtc").unwrap();
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ygtc-lint"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"));
     let assert = cmd
+        .arg("doctor")
         .arg("--json")
         .arg("--stdin")
         .write_stdin(stdin_flow)

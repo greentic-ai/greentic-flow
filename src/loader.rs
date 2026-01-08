@@ -168,7 +168,9 @@ pub(crate) fn load_with_schema_text(
                 .keys()
                 .filter(|k| !reserved_for_count.contains(&k.as_str()))
                 .count();
-            if op_count != 1 {
+            let is_component_exec = obj.contains_key("component.exec");
+            let component_combo = is_component_exec && op_count == 2;
+            if op_count != 1 && !(component_combo || schema_version < 2) {
                 return Err(FlowError::NodeComponentShape {
                     node_id: id.clone(),
                     location: node_location(&source_label, source_path, id),
@@ -231,7 +233,9 @@ pub(crate) fn load_with_schema_text(
             .keys()
             .filter(|k| !reserved.contains(&k.as_str()))
             .count();
-        if op_count != 1 {
+        let is_component_exec = node.raw.contains_key("component.exec");
+        let component_combo = is_component_exec && op_count == 2;
+        if op_count != 1 && !(component_combo || flow.schema_version.unwrap_or(1) < 2) {
             return Err(FlowError::NodeComponentShape {
                 node_id: id.clone(),
                 location: node_location(&source_label, source_path, id),

@@ -34,7 +34,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build binaries
         run: |
-          cargo build --locked --release --target ${{ matrix.target }} --bin greentic-flow --bin ygtc-lint
+          cargo build --locked --release --target ${{ matrix.target }} --bin greentic-flow
         env:
           CARGO_TERM_COLOR: always
       - name: Ensure nightly release exists (master)
@@ -53,7 +53,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: "greentic-flow,ygtc-lint"
+          bin: "greentic-flow"
           target: ${{ matrix.target }}
           archive: ${{ matrix.target }}  # keep names predictable
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -65,7 +65,7 @@ jobs:
         if: github.ref == 'refs/heads/master'
         uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: "greentic-flow,ygtc-lint"
+          bin: "greentic-flow"
           target: ${{ matrix.target }}
           archive: ${{ matrix.target }}  # keep names predictable
           token: ${{ secrets.GITHUB_TOKEN }}
