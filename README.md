@@ -16,11 +16,17 @@ Human-friendly YGTc v2 flow authoring: create flows, add component steps, keep r
 ## Create your first flow
 
 ```bash
-greentic-flow new --flow docs/examples/hello.ygtc --id hello-flow --type messaging \
+greentic-flow new --flow ./hello.ygtc --id hello-flow --type messaging \
   --name "Hello Flow"
 ```
 
-The result (kept under `docs/examples/hello.ygtc` and tested) is small and readable:
+`new` writes an empty v2 skeleton (`nodes: {}`) so you can start from a clean slate. If you want a ready-to-run “hello” flow, copy the example file we keep in the repo:
+
+```bash
+cp docs/examples/hello.ygtc /tmp/hello.ygtc
+```
+
+That example (also covered by tests) is small and readable:
 
 ```yaml
 id: hello-flow
@@ -34,12 +40,19 @@ nodes:
     routing: out
 ```
 
-## Add a component step (local build)
+## Add a component step (scaffold + build with greentic-component)
 
-Assume you built a component wasm at `components/hello-world/target/wasm32-wasip2/release/hello_world.wasm`.
+First scaffold the component with `greentic-component new --name hello-world --non-interactive` (run it in your desired components directory; it creates `hello-world/` with a manifest), then build it:
 
 ```bash
-greentic-flow add-step --flow docs/examples/hello_with_component.ygtc \
+greentic-component new --name hello-world --non-interactive 
+greentic-component build --manifest hello-world/component.manifest.json
+```
+
+This produces `hello-world/target/wasm32-wasip2/release/hello_world.wasm` and dev_flows with defaults. Then add it to a flow:
+
+```bash
+greentic-flow add-step --flow hello.ygtc \
   --mode default \
   --operation handle_message \
   --payload '{"input":"Hello from hello-world!"}' \
@@ -47,7 +60,7 @@ greentic-flow add-step --flow docs/examples/hello_with_component.ygtc \
   --local-wasm components/hello-world/target/wasm32-wasip2/release/hello_world.wasm
 ```
 
-This inserts a `hello-world` node (ordering preserved) and writes a sidecar `docs/examples/hello_with_component.ygtc.resolve.json` that binds the node to your local wasm (add `--pin` to hash it). The resulting flow looks like:
+This inserts a `hello-world` node (ordering preserved and derived from the component name) and writes a sidecar `docs/examples/hello_with_component.ygtc.resolve.json` that binds the node to your local wasm (add `--pin` to hash it). The resulting flow looks like:
 
 ```yaml
 id: hello-component

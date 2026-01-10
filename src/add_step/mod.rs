@@ -305,6 +305,11 @@ fn resolve_anchor(flow: &FlowIr, after: Option<&str>) -> std::result::Result<Str
         return Err(format!("anchor node '{}' not found", id));
     }
 
+    if flow.nodes.is_empty() {
+        // Empty flow: no anchor needed; apply_plan will insert the first node and set entrypoint.
+        return Ok(String::new());
+    }
+
     if let Some(entry) = flow.entrypoints.get_index(0) {
         return Ok(entry.1.clone());
     }

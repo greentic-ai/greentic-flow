@@ -772,6 +772,32 @@ fn build_routing_value(args: &AddStepArgs) -> Result<(Option<serde_json::Value>,
     Ok((Some(placeholder), true))
 }
 
+fn infer_node_id_hint(args: &AddStepArgs) -> Option<String> {
+    if let Some(explicit) = args.node_id.clone() {
+        return Some(explicit);
+    }
+    if let Some(comp_ref) = &args.component_ref {
+        let trimmed = comp_ref
+            .trim_start_matches("oci://")
+            .trim_start_matches("repo://")
+            .trim_start_matches("store://");
+        let last = trimmed.rsplit(['/', '\\']).next()?;
+        let base = last.split([':', '@']).next().unwrap_or(last);
+        if !base.is_empty() {
+            return Some(base.replace('_', "-"));
+        }
+    }
+    if let Some(path) = &args.local_wasm
+        && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+    {
+        let normalized = stem.replace('_', "-");
+        if !normalized.is_empty() {
+            return Some(normalized);
+        }
+    }
+    None
+}
+
 fn handle_add_step(args: AddStepArgs) -> Result<()> {
     let (routing_value, require_placeholder) = build_routing_value(&args)?;
     let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
@@ -785,6 +811,9 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
     let flow_ir = FlowIr::from_doc(doc)?;
 
     let catalog = ManifestCatalog::load_from_paths(&args.manifests);
+
+    let answers_arg = args.answers.clone();
+    let answers_file_arg = args.answers_file.clone();
 
     let (mode_input, require_placeholder_flag) = match args.mode {
         AddStepMode::Default => {
@@ -809,14 +838,14 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
             let (config_flow, schema_path) =
                 resolve_config_flow(args.config_flow.clone(), &args.manifests)?;
             let mut answers = serde_json::Map::new();
-            if let Some(a) = args.answers {
+            if let Some(a) = answers_arg {
                 let parsed: serde_json::Value =
                     serde_json::from_str(&a).context("parse --answers JSON")?;
                 if let Some(obj) = parsed.as_object() {
                     answers.extend(obj.clone());
                 }
             }
-            if let Some(file) = args.answers_file {
+            if let Some(file) = answers_file_arg {
                 let text = fs::read_to_string(&file)
                     .with_context(|| format!("read {}", file.display()))?;
                 let parsed: serde_json::Value =
@@ -837,10 +866,14 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
     };
 
     let (hint, node_value) = materialize_node(mode_input, &catalog)?;
+    let mut node_id_hint = infer_node_id_hint(&args);
+    if node_id_hint.is_none() {
+        node_id_hint = hint;
+    }
 
     let spec = AddStepSpec {
         after: args.after.clone(),
-        node_id_hint: args.node_id.or(hint),
+        node_id_hint,
         node: node_value,
         allow_cycles: args.allow_cycles,
         require_placeholder: require_placeholder_flag,

@@ -35,6 +35,51 @@ fn new_writes_v2_empty_flow() {
 }
 
 #[test]
+fn add_step_into_empty_flow_succeeds() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--operation")
+        .arg("handle_message")
+        .arg("--payload")
+        .arg(r#"{"input":"hi"}"#)
+        .arg("--routing-out")
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&flow_path);
+    let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
+    assert_eq!(nodes.len(), 1);
+    let (id, node) = nodes.iter().next().unwrap();
+    assert_eq!(id.as_str().unwrap(), "comp");
+    assert_eq!(
+        node.get(Value::from("routing")).unwrap().as_str(),
+        Some("out")
+    );
+}
+
+#[test]
 fn add_step_on_legacy_writes_v2_and_shorthand() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
@@ -383,8 +428,13 @@ nodes:
         .get(Value::from("routing"))
         .and_then(Value::as_sequence)
         .unwrap();
-    assert_eq!(routing[0].get("to").and_then(Value::as_str).unwrap(), "run");
-    let inserted = nodes.get(Value::from("run")).unwrap().as_mapping().unwrap();
+    let inserted_id = routing[0].get("to").and_then(Value::as_str).unwrap();
+    assert_eq!(inserted_id, "comp");
+    let inserted = nodes
+        .get(Value::from(inserted_id))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
     assert_eq!(
         inserted.get(Value::from("routing")).unwrap().as_str(),
         Some("out")
@@ -440,11 +490,13 @@ nodes:
         .unwrap()
         .as_sequence()
         .unwrap();
-    assert_eq!(
-        a_routing[0].get("to").and_then(Value::as_str).unwrap(),
-        "op"
-    );
-    let inserted = nodes.get(Value::from("op")).unwrap().as_mapping().unwrap();
+    let inserted_id = a_routing[0].get("to").and_then(Value::as_str).unwrap();
+    assert_eq!(inserted_id, "comp");
+    let inserted = nodes
+        .get(Value::from(inserted_id))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
     let ins_routing = inserted
         .get(Value::from("routing"))
         .and_then(Value::as_sequence)
