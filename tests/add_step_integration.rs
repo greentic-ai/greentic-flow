@@ -82,6 +82,7 @@ fn add_step_with_real_manifest_catalog() {
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ],
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = match plan_add_step(&flow, spec, &catalog) {

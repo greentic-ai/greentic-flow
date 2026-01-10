@@ -1,202 +1,106 @@
 # Greentic Flow
 
-Generic schema, loader, and intermediate representation for YGTC flows composed of self-describing component nodes.
+Human-friendly YGTc v2 flow authoring: create flows, add component steps, keep routing safe, and validate everything with one CLI.
+
+## Why flows?
+- **Readable YAML**: node key = node name, one operation key inside, routing shorthand (`out|reply|[...]`).
+- **Component-free authoring**: flows stay human; component sources live in a sidecar resolve file.
+- **Safe edits**: add/update/delete steps rewrite routing deterministically and validate against the schema.
+- **CI-ready**: built-in validator (`doctor`) and binstall-friendly releases.
 
 ## Install
-- From GitHub releases (binstall-friendly archives for Linux x86_64, macOS arm64/x86_64, and Windows x86_64): `cargo binstall greentic-flow`
-- From crates.io (no bundled binaries): `cargo install --locked greentic-flow`
-- Direct download: grab the `.tgz` for your target from the GitHub release tagged `v<version>` and place `greentic-flow` on your `PATH`.
+- GitHub Releases (binstall-ready): `cargo binstall greentic-flow`
+- crates.io (no bundled binaries): `cargo install --locked greentic-flow`
+- Direct download: pick the `.tgz` for your target from the latest release and put `greentic-flow` on your `PATH`.
 
-## Quickstart
-```rust
-use greentic_flow::{compile_flow, load_and_validate_bundle, resolve::resolve_parameters, loader};
-use greentic_types::NodeId;
+## Create your first flow
 
-let yaml = std::fs::read_to_string("fixtures/weather_bot.ygtc")?;
-let bundle = load_and_validate_bundle(&yaml, None)?;
-println!("Bundle entry node: {}", bundle.entry);
-
-let doc = loader::load_ygtc_from_str(&yaml)?;
-let flow = compile_flow(doc)?;
-let node = flow.nodes.get(&NodeId::new("forecast_weather")?).unwrap();
-let resolved = resolve_parameters(&node.input.mapping, &flow.metadata.extra, "nodes.forecast_weather")?;
-# Ok::<_, greentic_flow::error::FlowError>(())
+```bash
+greentic-flow new --flow docs/examples/hello.ygtc --id hello-flow --type messaging \
+  --name "Hello Flow"
 ```
 
-## Design Highlights
-- JSON Schema (`schemas/ygtc.flow.schema.json`) enforces exactly one component key per node plus optional routing metadata.
-- Loader converts YAML documents to `FlowDoc`, validates against the schema, extracts component metadata, and performs basic graph checks.
-- Compiler emits canonical `greentic_types::Flow` nodes so runtimes can post-process component payloads while exposing `NodeKind` classification for adapters.
-- `NodeKind::Adapter` recognises node component strings shaped as `<namespace>.<adapter>.<operation>` and keeps the trailing segments joined so nested operations are preserved.
-- `resolve::resolve_parameters` pre-resolves only `parameters.*` references, leaving other runtime bindings intact.
-- `start` is optional; if omitted and an `in` node exists, the loader defaults `start` to `in`.
+The result (kept under `docs/examples/hello.ygtc` and tested) is small and readable:
 
-## Adapter Registry Format
-Adapter-backed nodes can be linted against an on-disk catalog that maps `<namespace>.<adapter>` pairs to the operations they expose. The registry is JSON by default, with optional TOML support via the `toml` feature.
-
-```json
-{
-  "adapters": {
-    "messaging.telegram": ["sendMessage", "editMessage"],
-    "email.google": ["send", "draft.create"]
-  }
-}
+```yaml
+id: hello-flow
+type: messaging
+schema_version: 2
+start: start
+nodes:
+  start:
+    templating.handlebars:
+      text: "Hello from greentic-flow!"
+    routing: out
 ```
 
-With the registry loaded, the `adapter_resolvable` rule reports any node whose component string cannot be found in the catalog.
+## Add a component step (local build)
+
+Assume you built a component wasm at `components/hello-world/target/wasm32-wasip2/release/hello_world.wasm`.
+
+```bash
+greentic-flow add-step --flow docs/examples/hello_with_component.ygtc \
+  --mode default \
+  --operation handle_message \
+  --payload '{"input":"Hello from hello-world!"}' \
+  --routing-out \
+  --local-wasm components/hello-world/target/wasm32-wasip2/release/hello_world.wasm
+```
+
+This inserts a `hello-world` node (ordering preserved) and writes a sidecar `docs/examples/hello_with_component.ygtc.resolve.json` that binds the node to your local wasm (add `--pin` to hash it). The resulting flow looks like:
+
+```yaml
+id: hello-component
+type: messaging
+schema_version: 2
+start: hello-world
+nodes:
+  hello-world:
+    handle_message:
+      input:
+        input: "Hello from hello-world!"
+    routing: out
+```
+
+## Use public components (remote + pin)
+
+```bash
+greentic-flow add-step --flow flows/main.ygtc --mode default \
+  --operation run --payload '{}' \
+  --routing-out \
+  --component oci://ghcr.io/greentic-ai/components/templates:0.1.2 \
+  --pin
+```
+
+The sidecar records the remote reference and resolved digest (`--pin`). Perfect for CI where you want reproducible pulls.
+
+## Update or delete steps safely
+- `greentic-flow update-step --flow flows/main.ygtc --step hello --answers '{"input":"hi again"}' --routing-reply`
+  - Re-materializes using the sidecar binding, prefills current payload, merges your answers, and rewrites routing to `reply`.
+- `greentic-flow delete-step --flow flows/main.ygtc --step mid --strategy splice`
+  - Removes `mid` and splices predecessors to the deleted node’s targets; removes the sidecar entry too.
+
+## Validate flows (CI & local)
+
+```
+greentic-flow doctor flows/                   # recursive over .ygtc
+greentic-flow doctor --json flows/main.ygtc   # machine-readable
+```
+
+Uses the embedded `schemas/ygtc.flow.schema.json` by default; add `--registry <adapter_catalog.json>` for adapter linting.
+
+## Deep dives
+- CLI details and routing flags: [`docs/cli.md`](docs/cli.md)
+- Add-step design and routing rules: [`docs/add_step_design.md`](docs/add_step_design.md)
+- Deployment flows: [`docs/deployment-flows.md`](docs/deployment-flows.md)
+- Config flow execution: [`docs/add_step_design.md`](docs/add_step_design.md#config-mode)
 
 ## Development
 - `cargo fmt --check`
-- `cargo clippy -D warnings`
+- `cargo clippy --all-targets -- -D warnings`
 - `cargo test`
 
-Fixtures under `fixtures/` mirror common success and failure scenarios.
-
-Run all CI-equivalent checks locally via:
-
-```
-LOCAL_CHECK_ONLINE=1 ci/local_check.sh
-```
-
-Toggles:
-
-- `LOCAL_CHECK_ONLINE=1` — enable networked checks (schema fetch, etc.)
-- `LOCAL_CHECK_STRICT=1` — treat missing tools as immediate failures (default already fails required skips unless `LOCAL_CHECK_ALLOW_SKIP=1`)
-- `LOCAL_CHECK_VERBOSE=1` — echo each command
-- `LOCAL_CHECK_ALLOW_SKIP=1` — allow required CI steps to be skipped (not recommended)
-
-## CLI
-
-### Flow scaffolding
-
-`greentic-flow` ships with a lightweight scaffolder for new `.ygtc` files:
-
-```
-cargo run --bin greentic-flow -- new flows/demo.ygtc --kind messaging
-```
-
-For metadata tweaks without rebuilding the flow, use `update` (non-destructive):
-
-```
-cargo run --bin greentic-flow -- update --flow flows/demo.ygtc --name "Demo bot" --tags prod,canary
-```
-
-Component bindings live in a sidecar (`<flow>.ygtc.resolve.json`) so the human-authored flow stays component-free. `add-step`, `update-step`, and `delete-step` keep the sidecar in sync; provide `--local-wasm` or `--component` (and optionally `--pin`) when inserting steps.
-
-Use `bind-component` to attach/repair sidecar entries without changing flow content:
-
-```
-cargo run --bin greentic-flow -- bind-component --flow flows/demo.ygtc --step hello --local-wasm target/wasm32-wasip2/release/hello.wasm --pin
-```
-
-`update-step` now uses the sidecar mapping: it requires the mapped component to exist locally (for local wasm) or in the distributor cache (for remote refs). If the mapping is missing or stale, run `bind-component` or re-add the step with `--component/--local-wasm`.
-
-Flags of note:
-
-- `--kind messaging|events|deployment` controls the template. `--kind deployment`
-  is just sugar for `type: events` plus a first node that assumes access to the
-  `greentic:deploy-plan@1.0.0` world.
-- `--deployment` aliases `--kind deployment`.
-- `--pack-manifest <path>` (or a local `manifest.yaml` if no flag is provided)
-  lets the tool peek at pack metadata. It will:
-  - default `--kind` to `deployment` when the pack declares `kind: deployment`,
-  - append the new flow to the manifest's `flows:` array (path stored relative
-    to the manifest directory), and
-  - emit informational hints (for example, when a deployment pack scaffolds a
-    messaging flow anyway).
-- `--id`, `--description`, and `--force` cover the usual ergonomics.
-
-Running the command writes a ready-to-edit `.ygtc` file and reports any hints.
-
-### Flow linting (doctor)
-
-Run `greentic-flow doctor` to validate flows. Example:
-
-```
-cargo run --bin greentic-flow -- doctor fixtures --schema schemas/ygtc.flow.schema.json
-```
-
-To enable adapter linting, provide `--registry`:
-
-```
-cargo run --bin greentic-flow -- doctor \
-  --schema schemas/ygtc.flow.schema.json \
-  --registry tests/data/registry_ok.json \
-  tests/data/flow_ok.ygtc
-```
-
-For machine-readable CI, use `--json`; the command exits non-zero on any error and
-prints the validated bundle plus diagnostics:
-
-```
-cargo run --quiet --bin greentic-flow -- doctor --json tests/data/flow_ok.ygtc
-# { "ok": true, "bundle": { "id": "flow_ok", ... } }
-```
-
-Pipelines can also stream flows via stdin:
-
-```
-cat tests/data/flow_ok.ygtc | cargo run --quiet --bin greentic-flow -- doctor --json --stdin
-```
-
-And in CI you can assert the BLAKE3 hash is present:
-
-```
-greentic-flow doctor --json --stdin < flow.ygtc | jq -e '.ok and .hash_blake3 != null'
-```
-
-The CLI recursively walks any directories provided, only inspecting files with a `.ygtc` extension. Schema validation always runs; adapter checks are additive when a registry is supplied.
-
-### CLI commands
-
-- `greentic-flow new --flow <path> --id <id> --type <type> [--schema-version 2] [--name ...] [--description ...]` — write an empty v2 flow skeleton.
-- `greentic-flow add-step ...` — insert a node after an anchor; accepts legacy input but always writes v2 (routing shorthand respected).
-- `greentic-flow update-step --flow <path> --step <node> [--answers ...] [--routing ...] [--operation ...] [--write]` — update an existing node payload/routing with optional overrides.
-- `greentic-flow delete-step --flow <path> --step <node> [--strategy splice|remove-only] [--if-multiple-predecessors error|splice-all] [--write]` — remove a node and optionally splice routing.
-- `greentic-flow doctor ...` — validate flows (schema + optional adapter registry).
-
-The shared flow schema is published from this repository at
-`https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json`
-and matches the `$id` embedded in `schemas/ygtc.flow.schema.json`.
-
-## Secrets workflow
-- `.ygtc` flows do not embed secret requirements or values.
-- Secret requirements are emitted by components/packs and surfaced by tooling such as `greentic-secrets init --pack <pack>`.
-- Runtimes and preflight tooling should rely on the aggregated pack metadata (and the secrets-store interface) rather than extending the flow schema.
-
-## Config flows (convention)
-
-A config flow is a regular flow whose kind may be `component-config` (or any other string) and whose final node emits a payload shaped as:
-
-```json
-{ "node_id": "some_step", "node": { /* full node object with one component key plus routing */ } }
-```
-
-Tools like `greentic-dev` can execute these flows and splice the emitted node into another flow. The engine itself does not special-case config flows: node components such as `questions` (prompting for values) and `template` (rendering a JSON template) are handled like any other component.
-
-For lightweight automation in this crate, `config_flow::run_config_flow` can execute simple config flows by seeding answers for `questions` fields and rendering the final `template` payload into `{ node_id, node }`.
-
-## Deployment flows (events-based)
-
-Deployment flows are standard `type: events` flows that operate on a
-`DeploymentPlan` provided by hosting tooling. Use
-
-```
-greentic-flow new flows/deploy_stack.ygtc --kind deployment
-```
-
-to scaffold one quickly. The template creates a first node that highlights the
-`greentic:deploy-plan@1.0.0` world so the component can read the plan and emit
-status updates. Node IDs and component kinds remain opaque strings; nothing in
-this crate hard-codes provider-specific behaviour.
-
-See [`docs/deployment-flows.md`](docs/deployment-flows.md) for a deeper dive
-covering plan access, CLI helpers, and authoring guidelines.
-
-A pack may declare `kind: deployment` in its manifest to signal that most of its
-flows are deployment-oriented. The scaffolder simply treats that as a hint and
-emits an informational message if you add a messaging flow to such a pack. Mixed
-packs remain perfectly valid.
+Or run everything: `LOCAL_CHECK_ONLINE=1 ci/local_check.sh`
 
 ## Environment
 - `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`) targets your collector.

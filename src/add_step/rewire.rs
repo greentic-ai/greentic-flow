@@ -39,7 +39,7 @@ pub fn rewrite_placeholder_routes(
         );
     }
 
-    if !replaced {
+    if !replaced && require_placeholder {
         for f in fallback {
             if !allow_cycles && f.to.as_deref() == Some(anchor) {
                 return Err("routing would introduce a cycle back to anchor".to_string());

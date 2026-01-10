@@ -45,6 +45,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
@@ -92,6 +93,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
@@ -120,6 +122,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let updated = apply_and_validate(
@@ -179,6 +182,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let updated = apply_and_validate(
@@ -233,6 +237,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let updated = apply_and_validate(
@@ -277,6 +282,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let updated = apply_and_validate(
@@ -322,6 +328,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
@@ -359,6 +366,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let updated = apply_and_validate(
@@ -400,6 +408,7 @@ nodes:
             "routing": [ { "to": "a" } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog);
@@ -427,6 +436,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let ir1 = parse_flow_to_ir(flow).expect("parse first");
@@ -477,6 +487,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog);

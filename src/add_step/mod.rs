@@ -31,6 +31,7 @@ pub struct AddStepSpec {
     pub node_id_hint: Option<String>,
     pub node: Value,
     pub allow_cycles: bool,
+    pub require_placeholder: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,12 +68,11 @@ pub fn plan_add_step(
         }
     };
     let mut insert_before_entrypoint = false;
-    if spec.after.is_none() {
-        if let Some((_, target)) = flow.entrypoints.get_index(0)
-            && target == &anchor_source
-        {
-            insert_before_entrypoint = true;
-        }
+    if spec.after.is_none()
+        && let Some((_, target)) = flow.entrypoints.get_index(0)
+        && target == &anchor_source
+    {
+        insert_before_entrypoint = true;
     }
     let anchor = anchor_source;
 
@@ -124,7 +124,7 @@ pub fn plan_add_step(
         &anchor_old_routing,
         spec.allow_cycles,
         &anchor,
-        true,
+        spec.require_placeholder,
     )
     .map_err(|msg| {
         vec![Diagnostic {
@@ -365,6 +365,7 @@ pub fn add_step_from_config_flow(
         node_id_hint: Some(output.node_id.clone()),
         node: output.node.clone(),
         allow_cycles,
+        require_placeholder: true,
     };
 
     let plan =

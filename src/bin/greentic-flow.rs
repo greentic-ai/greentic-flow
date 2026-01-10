@@ -33,6 +33,7 @@ use greentic_types::flow_resolve::{
     read_flow_resolve, sidecar_path_for_flow, write_flow_resolve,
 };
 use indexmap::IndexMap;
+use serde_json::json;
 use sha2::{Digest, Sha256};
 #[derive(Parser, Debug)]
 #[command(name = "greentic-flow", about = "Flow scaffolding helpers")]
@@ -659,9 +660,24 @@ struct AddStepArgs {
     /// Payload JSON for the new node (default mode).
     #[arg(long = "payload", default_value = "{}")]
     payload: String,
-    /// Optional routing JSON for the new node (default mode).
-    #[arg(long = "routing")]
-    routing: Option<String>,
+    /// Routing shorthand: make the new node terminal (out).
+    #[arg(long = "routing-out", conflicts_with_all = ["routing_reply", "routing_next", "routing_multi_to", "routing_json", "routing_to_anchor"])]
+    routing_out: bool,
+    /// Routing shorthand: reply to origin.
+    #[arg(long = "routing-reply", conflicts_with_all = ["routing_out", "routing_next", "routing_multi_to", "routing_json", "routing_to_anchor"])]
+    routing_reply: bool,
+    /// Route to a specific node id.
+    #[arg(long = "routing-next", conflicts_with_all = ["routing_out", "routing_reply", "routing_multi_to", "routing_json"])]
+    routing_next: Option<String>,
+    /// Route to multiple node ids (comma-separated).
+    #[arg(long = "routing-multi-to", conflicts_with_all = ["routing_out", "routing_reply", "routing_next", "routing_json"])]
+    routing_multi_to: Option<String>,
+    /// Explicit routing JSON file (escape hatch).
+    #[arg(long = "routing-json", conflicts_with_all = ["routing_out", "routing_reply", "routing_next", "routing_multi_to"])]
+    routing_json: Option<PathBuf>,
+    /// Explicitly thread to the anchor’s existing targets (default if no routing flag is given).
+    #[arg(long = "routing-to-anchor", conflicts_with_all = ["routing_out", "routing_reply", "routing_next", "routing_multi_to", "routing_json"])]
+    routing_to_anchor: bool,
     /// Config flow file to execute (config mode).
     #[arg(long = "config-flow")]
     config_flow: Option<PathBuf>,
@@ -722,7 +738,42 @@ struct BindComponentArgs {
     write: bool,
 }
 
+fn build_routing_value(args: &AddStepArgs) -> Result<(Option<serde_json::Value>, bool)> {
+    if let Some(path) = &args.routing_json {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("read routing json {}", path.display()))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).context("parse --routing-json as JSON")?;
+        return Ok((Some(parsed), false));
+    }
+    if args.routing_out {
+        return Ok((Some(serde_json::Value::String("out".to_string())), false));
+    }
+    if args.routing_reply {
+        return Ok((Some(serde_json::Value::String("reply".to_string())), false));
+    }
+    if let Some(next) = &args.routing_next {
+        return Ok((Some(json!([{ "to": next }])), false));
+    }
+    if let Some(multi) = &args.routing_multi_to {
+        let targets: Vec<_> = multi
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if targets.is_empty() {
+            anyhow::bail!("--routing-multi-to requires at least one target");
+        }
+        let routes: Vec<_> = targets.into_iter().map(|t| json!({ "to": t })).collect();
+        return Ok((Some(serde_json::Value::Array(routes)), false));
+    }
+    // Default: thread to anchor routes (placeholder-based internally).
+    let placeholder = json!([{ "to": greentic_flow::splice::NEXT_NODE_PLACEHOLDER }]);
+    Ok((Some(placeholder), true))
+}
+
 fn handle_add_step(args: AddStepArgs) -> Result<()> {
+    let (routing_value, require_placeholder) = build_routing_value(&args)?;
     let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
     let (component_source, resolve_mode) = resolve_component_source_inputs(
         args.local_wasm.as_ref(),
@@ -735,7 +786,7 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
 
     let catalog = ManifestCatalog::load_from_paths(&args.manifests);
 
-    let mode_input = match args.mode {
+    let (mode_input, require_placeholder_flag) = match args.mode {
         AddStepMode::Default => {
             let operation = args.operation.clone().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -744,23 +795,15 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
             })?;
             let payload_json: serde_json::Value =
                 serde_json::from_str(&args.payload).context("parse --payload as JSON")?;
-            let routing_json = if let Some(r) = args.routing.as_ref() {
-                if r == "out" || r == "reply" {
-                    Some(serde_json::Value::String(r.clone()))
-                } else {
-                    Some(
-                        serde_json::from_str(r)
-                            .context("parse --routing as JSON array of routes")?,
-                    )
-                }
-            } else {
-                None
-            };
-            AddStepModeInput::Default {
-                operation,
-                payload: payload_json,
-                routing: routing_json,
-            }
+            let routing_json = routing_value.clone();
+            (
+                AddStepModeInput::Default {
+                    operation,
+                    payload: payload_json,
+                    routing: routing_json,
+                },
+                require_placeholder,
+            )
         }
         AddStepMode::Config => {
             let (config_flow, schema_path) =
@@ -782,11 +825,14 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
                     answers.extend(obj.clone());
                 }
             }
-            AddStepModeInput::Config {
-                config_flow,
-                schema_path: schema_path.into_boxed_path(),
-                answers,
-            }
+            (
+                AddStepModeInput::Config {
+                    config_flow,
+                    schema_path: schema_path.into_boxed_path(),
+                    answers,
+                },
+                true,
+            )
         }
     };
 
@@ -797,6 +843,7 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
         node_id_hint: args.node_id.or(hint),
         node: node_value,
         allow_cycles: args.allow_cycles,
+        require_placeholder: require_placeholder_flag,
     };
 
     let plan = plan_add_step(&flow_ir, spec, &catalog)

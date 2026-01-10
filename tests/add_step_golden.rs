@@ -33,6 +33,7 @@ fn add_step_golden_flow() {
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan success");

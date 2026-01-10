@@ -66,8 +66,6 @@ nodes:
         .arg("handle_message")
         .arg("--payload")
         .arg(r#"{"msg":"hi"}"#)
-        .arg("--routing")
-        .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
         .arg("--local-wasm")
         .arg("comp.wasm")
         .arg("--after")
@@ -110,8 +108,6 @@ nodes:
         .arg("handle_message")
         .arg("--payload")
         .arg(r#"{"msg":"hi"}"#)
-        .arg("--routing")
-        .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
         .arg("--local-wasm")
         .arg("comp.wasm")
         .arg("--after")
@@ -163,8 +159,6 @@ nodes:
         .arg("run")
         .arg("--payload")
         .arg(r#"{}"#)
-        .arg("--routing")
-        .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
         .arg("--component")
         .arg("oci://example/component:latest")
         .arg("--pin")
@@ -227,8 +221,6 @@ nodes:
         .arg("run")
         .arg("--payload")
         .arg(r#"{}"#)
-        .arg("--routing")
-        .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
         .arg("--local-wasm")
         .arg("comp.wasm")
         .arg("--write")
@@ -246,12 +238,12 @@ nodes:
     assert_ne!(default_target, "a");
 
     let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
-    assert!(nodes.contains_key(&Value::from("a")));
-    assert!(nodes.contains_key(&Value::from("b")));
-    assert!(nodes.contains_key(&Value::from(default_target)));
+    assert!(nodes.contains_key(Value::from("a")));
+    assert!(nodes.contains_key(Value::from("b")));
+    assert!(nodes.contains_key(Value::from(default_target)));
 
     let inserted = nodes
-        .get(&Value::from(default_target))
+        .get(Value::from(default_target))
         .and_then(Value::as_mapping)
         .unwrap();
     let routing = inserted
@@ -261,7 +253,7 @@ nodes:
     assert_eq!(routing[0].get("to").and_then(Value::as_str).unwrap(), "a");
 
     let a_node = nodes
-        .get(&Value::from("a"))
+        .get(Value::from("a"))
         .and_then(Value::as_mapping)
         .unwrap();
     let a_routing = a_node
@@ -307,8 +299,6 @@ nodes:
         .arg("run")
         .arg("--payload")
         .arg(r#"{}"#)
-        .arg("--routing")
-        .arg(r#"[{"to":"NEXT_NODE_PLACEHOLDER"}]"#)
         .arg("--local-wasm")
         .arg("comp.wasm")
         .arg("--after")
@@ -319,12 +309,12 @@ nodes:
     let content = fs::read_to_string(&flow_path).unwrap();
     let mut order = Vec::new();
     for line in content.lines() {
-        if line.starts_with("  ") && !line.starts_with("    ") {
-            if let Some(id) = line[2..].strip_suffix(':') {
-                if !id.starts_with('-') {
-                    order.push(id.to_string());
-                }
-            }
+        if line.starts_with("  ")
+            && !line.starts_with("    ")
+            && let Some(id) = line[2..].strip_suffix(':')
+            && !id.starts_with('-')
+        {
+            order.push(id.to_string());
         }
     }
     let inserted = order
@@ -339,6 +329,129 @@ nodes:
             inserted.clone(),
             "third".to_string()
         ]
+    );
+}
+
+#[test]
+fn add_step_routing_out_flag() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    hop: {}
+    routing:
+      - to: end
+  end:
+    hop: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("comp.wasm"), b"bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--routing-out")
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .arg("--after")
+        .arg("start")
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&flow_path);
+    let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
+    let start = nodes
+        .get(Value::from("start"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    let routing = start
+        .get(Value::from("routing"))
+        .and_then(Value::as_sequence)
+        .unwrap();
+    assert_eq!(routing[0].get("to").and_then(Value::as_str).unwrap(), "run");
+    let inserted = nodes.get(Value::from("run")).unwrap().as_mapping().unwrap();
+    assert_eq!(
+        inserted.get(Value::from("routing")).unwrap().as_str(),
+        Some("out")
+    );
+}
+
+#[test]
+fn add_step_routing_next_flag() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  a:
+    hop: {}
+    routing:
+      - to: b
+  b:
+    hop: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("comp.wasm"), b"bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--operation")
+        .arg("op")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--routing-next")
+        .arg("b")
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .arg("--after")
+        .arg("a")
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&flow_path);
+    let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
+    let a = nodes.get(Value::from("a")).unwrap().as_mapping().unwrap();
+    let a_routing = a
+        .get(Value::from("routing"))
+        .unwrap()
+        .as_sequence()
+        .unwrap();
+    assert_eq!(
+        a_routing[0].get("to").and_then(Value::as_str).unwrap(),
+        "op"
+    );
+    let inserted = nodes.get(Value::from("op")).unwrap().as_mapping().unwrap();
+    let ins_routing = inserted
+        .get(Value::from("routing"))
+        .and_then(Value::as_sequence)
+        .unwrap();
+    assert_eq!(
+        ins_routing[0].get("to").and_then(Value::as_str).unwrap(),
+        "b"
     );
 }
 

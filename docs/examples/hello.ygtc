@@ -1,0 +1,9 @@
+id: hello-flow
+type: messaging
+schema_version: 2
+start: start
+nodes:
+  start:
+    templating.handlebars:
+      text: "Hello from greentic-flow!"
+    routing: out

@@ -45,6 +45,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog);
@@ -79,6 +80,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
@@ -117,6 +119,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog);
@@ -145,6 +148,7 @@ nodes:
             "routing": [ { "to": "start", "bad": true } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog);
@@ -172,6 +176,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
@@ -211,6 +216,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
 
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
@@ -241,6 +247,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
     let plan = plan_add_step(&ir, spec, &catalog);
     assert!(plan.is_err());
@@ -267,6 +274,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
     let plan = plan_add_step(&ir, spec, &catalog);
     assert!(plan.is_err());
@@ -294,6 +302,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
     let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
@@ -321,6 +330,7 @@ nodes:
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
     let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
@@ -344,6 +354,7 @@ nodes: {}
             "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
         }),
         allow_cycles: false,
+        require_placeholder: true,
     };
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
     let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
