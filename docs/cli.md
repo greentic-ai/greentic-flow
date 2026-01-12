@@ -38,7 +38,8 @@ Developer guide: insert a component-backed node and keep the sidecar in sync. Al
 
 Start simple (local wasm, manual payload):
 ```
-greentic-flow add-step --flow flows/main.ygtc --mode default \
+greentic-flow add-step --flow flows/main.ygtc \
+  --node-id hello-world \
   --operation handle_message --payload '{"input":"hi"}' \
   --local-wasm components/hello-world/target/wasm32-wasip2/release/hello_world.wasm
 ```
@@ -47,7 +48,8 @@ greentic-flow add-step --flow flows/main.ygtc --mode default \
 
 Public component (remote OCI):
 ```
-greentic-flow add-step --flow flows/main.ygtc --mode default \
+greentic-flow add-step --flow flows/main.ygtc \
+  --node-id templates \
   --operation handle_message --payload '{"input":"hi"}' \
   --component oci://ghcr.io/greentic-ai/components/templates:0.1.2 --pin
 ```
@@ -57,6 +59,7 @@ greentic-flow add-step --flow flows/main.ygtc --mode default \
 Using dev_flows (config mode) for schema-valid payloads:
 ```
 greentic-flow add-step --flow flows/main.ygtc --mode config \
+  --node-id hello-world \
   --manifest components/hello-world/component.manifest.json \
   --after start
 ```
@@ -67,7 +70,11 @@ greentic-flow add-step --flow flows/main.ygtc --mode config \
 Anchoring and placement:
 - `--after <node>` inserts immediately after that node.
 - If omitted, the new node is prepended before the entrypoint target (or first node) and the entrypoint is retargeted to the new node.
-- Node IDs are derived from hints or operation names; collisions get `__2`, `__3`, etc. Placeholder hints are rejected.
+- Node IDs come from `--node-id`; collisions get `__2`, `__3`, etc. Placeholder hints are rejected.
+
+Required inputs:
+- `--node-id` sets the new node id.
+- `--local-wasm` (local) or `--component` (remote) provides the sidecar binding.
 
 Routing flags (no JSON needed):
 - Default (no flag): thread to the anchor’s existing routing.
@@ -79,7 +86,7 @@ Routing flags (no JSON needed):
 - Config-mode still enforces placeholder semantics internally; you never type the placeholder.
 
 Sidecar expectations:
-- Required: `--local-wasm` (local) or `--component` (remote). If missing, add-step fails with guidance.
+- `--component` accepts `oci://`, `repo://`, or `store://` references. `oci://` must point to a public registry.
 - `--pin` hashes local wasm or resolves remote tags to digests; stored in `*.ygtc.resolve.json`.
 
 Safety/inspection:
@@ -90,7 +97,7 @@ Re-materialize an existing node using its sidecar binding. Prefills with current
 
 ```
 greentic-flow update-step --flow flows/main.ygtc --step hello \
-  --mode config --answers '{"input":"hi again"}' --routing reply
+  --answers '{"input":"hi again"}' --routing reply
 ```
 
 Requires a sidecar entry for the node; errors if missing (suggests `bind-component` or re-run add-step). `--non-interactive` merges provided answers/prefill and fails if required fields are still missing. `--operation` can rename the op key.
@@ -127,6 +134,7 @@ greentic-flow doctor --json --stdin < flows/main.ygtc
 ```
 
 Defaults to the embedded `schemas/ygtc.flow.schema.json`. `--json` emits a machine-readable report for one flow; `--registry` enables adapter_resolvable linting.
+Also updates the flow’s `*.ygtc.resolve.json` to drop stale node bindings and keep the flow name in sync.
 
 ## Output reference
 - add-step/update-step/delete-step/bind-component print a summary line; flows are written unless `--dry-run`/`--validate-only`.

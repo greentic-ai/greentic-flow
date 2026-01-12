@@ -58,6 +58,8 @@ fn add_step_into_empty_flow_succeeds() {
         .arg(&flow_path)
         .arg("--mode")
         .arg("default")
+        .arg("--node-id")
+        .arg("comp")
         .arg("--operation")
         .arg("handle_message")
         .arg("--payload")
@@ -107,6 +109,8 @@ nodes:
         .arg(&flow_path)
         .arg("--mode")
         .arg("default")
+        .arg("--node-id")
+        .arg("comp")
         .arg("--operation")
         .arg("handle_message")
         .arg("--payload")
@@ -149,6 +153,8 @@ nodes:
         .arg(&flow_path)
         .arg("--mode")
         .arg("default")
+        .arg("--node-id")
+        .arg("comp")
         .arg("--operation")
         .arg("handle_message")
         .arg("--payload")
@@ -200,12 +206,14 @@ nodes:
         .arg(&flow_path)
         .arg("--mode")
         .arg("default")
+        .arg("--node-id")
+        .arg("remote")
         .arg("--operation")
         .arg("run")
         .arg("--payload")
         .arg(r#"{}"#)
         .arg("--component")
-        .arg("oci://example/component:latest")
+        .arg("oci://example.com/component:latest")
         .arg("--pin")
         .arg("--after")
         .arg("start")
@@ -262,6 +270,8 @@ nodes:
         .arg(&flow_path)
         .arg("--mode")
         .arg("default")
+        .arg("--node-id")
+        .arg("inserted")
         .arg("--operation")
         .arg("run")
         .arg("--payload")
@@ -340,6 +350,8 @@ nodes:
         .arg(&flow_path)
         .arg("--mode")
         .arg("default")
+        .arg("--node-id")
+        .arg("inserted")
         .arg("--operation")
         .arg("run")
         .arg("--payload")
@@ -362,16 +374,12 @@ nodes:
             order.push(id.to_string());
         }
     }
-    let inserted = order
-        .iter()
-        .find(|id| id != &"first" && id != &"second" && id != &"third")
-        .expect("inserted node id");
     assert_eq!(
         order,
         vec![
             "first".to_string(),
             "second".to_string(),
-            inserted.clone(),
+            "inserted".to_string(),
             "third".to_string()
         ]
     );
@@ -405,6 +413,8 @@ nodes:
         .arg(&flow_path)
         .arg("--mode")
         .arg("default")
+        .arg("--node-id")
+        .arg("comp")
         .arg("--operation")
         .arg("run")
         .arg("--payload")
@@ -469,6 +479,8 @@ nodes:
         .arg(&flow_path)
         .arg("--mode")
         .arg("default")
+        .arg("--node-id")
+        .arg("comp")
         .arg("--operation")
         .arg("op")
         .arg("--payload")
@@ -720,6 +732,200 @@ nodes:
         hello.get(Value::from("routing")).unwrap().as_str(),
         Some("out")
     );
+}
+
+#[test]
+fn add_step_rejects_invalid_component_scheme() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    fs::write(dir.path().join("comp.wasm"), b"bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("comp")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--component")
+        .arg("badref")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--component must start with oci://, repo://, or store://",
+        ));
+}
+
+#[test]
+fn add_step_rejects_private_oci_host() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    fs::write(dir.path().join("comp.wasm"), b"bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("comp")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--component")
+        .arg("oci://localhost/component:latest")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "oci:// references must use a public registry host",
+        ));
+}
+
+#[test]
+fn update_step_rejects_invalid_component_scheme() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    op:
+      field: old
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("update-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--step")
+        .arg("hello")
+        .arg("--component")
+        .arg("badref")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--component must start with oci://, repo://, or store://",
+        ));
+}
+
+#[test]
+fn update_step_rejects_private_oci_host() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    op:
+      field: old
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("update-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--step")
+        .arg("hello")
+        .arg("--component")
+        .arg("oci://localhost/component:latest")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "oci:// references must use a public registry host",
+        ));
+}
+
+#[test]
+fn doctor_prunes_sidecar_to_match_flow() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  keep:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"old.ygtc","nodes":{"keep":{"source":{"kind":"local","path":"comp.wasm"}},"stale":{"source":{"kind":"local","path":"old.wasm"}}}}"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .success();
+
+    let sidecar: JsonValue =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    assert_eq!(
+        sidecar.get("flow").and_then(JsonValue::as_str),
+        flow_path.file_name().and_then(|s| s.to_str())
+    );
+    let nodes = sidecar.get("nodes").and_then(JsonValue::as_object).unwrap();
+    assert!(nodes.contains_key("keep"));
+    assert!(!nodes.contains_key("stale"));
 }
 
 #[test]

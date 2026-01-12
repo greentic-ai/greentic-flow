@@ -49,6 +49,74 @@ pub struct Diagnostic {
     pub location: Option<String>,
 }
 
+fn looks_like_component_id(hint: &str) -> bool {
+    let trimmed = hint.trim();
+    if trimmed.contains('.') {
+        return true;
+    }
+    let parts: Vec<&str> = trimmed.split('_').filter(|p| !p.is_empty()).collect();
+    parts.len() >= 3
+}
+
+fn simplify_component_name(raw: &str) -> Option<String> {
+    let mut candidate = raw.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+    if let Some(last) = candidate.rsplit(['/', '\\']).next() {
+        candidate = last;
+    }
+    if let Some((base, _)) = candidate.split_once('@') {
+        candidate = base;
+    }
+    if let Some((base, _)) = candidate.split_once(':') {
+        candidate = base;
+    }
+    if let Some(last) = candidate.rsplit('.').next() {
+        candidate = last;
+    }
+    let underscore_parts: Vec<&str> = candidate.split('_').filter(|p| !p.is_empty()).collect();
+    if underscore_parts.len() >= 3 {
+        candidate = underscore_parts[underscore_parts.len() - 1];
+    }
+    let normalized = candidate.replace('_', "-");
+    if normalized.trim().is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn component_name_from_node(node: &Value) -> Option<String> {
+    let obj = node.as_object()?;
+    if let Some(exec) = obj.get("component.exec")
+        && let Some(component) = exec.get("component").and_then(Value::as_str)
+    {
+        return simplify_component_name(component);
+    }
+    if let Some(component) = obj.get("component").and_then(Value::as_str) {
+        return simplify_component_name(component);
+    }
+    None
+}
+
+pub fn normalize_node_id_hint(hint: Option<String>, node: &Value) -> Option<String> {
+    let derived = component_name_from_node(node);
+    match (hint.as_deref(), derived) {
+        (_, None) => hint,
+        (None, Some(name)) => Some(name),
+        (Some(existing), Some(name)) => {
+            if existing.trim().is_empty()
+                || is_placeholder_value(existing)
+                || looks_like_component_id(existing)
+            {
+                return Some(name);
+            }
+            Some(existing.to_string())
+        }
+    }
+}
+
 pub fn plan_add_step(
     flow: &FlowIr,
     spec: AddStepSpec,
@@ -364,10 +432,11 @@ pub fn add_step_from_config_flow(
             .with_source_path(Some(config_flow_path)),
     })?;
     let output = run_config_flow(&config_yaml, schema_path, answers)?;
+    let node_id_hint = normalize_node_id_hint(Some(output.node_id.clone()), &output.node);
 
     let spec = AddStepSpec {
         after,
-        node_id_hint: Some(output.node_id.clone()),
+        node_id_hint,
         node: output.node.clone(),
         allow_cycles,
         require_placeholder: true,

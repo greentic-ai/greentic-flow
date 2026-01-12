@@ -53,14 +53,14 @@ This produces `hello-world/target/wasm32-wasip2/release/hello_world.wasm` and de
 
 ```bash
 greentic-flow add-step --flow hello.ygtc \
-  --mode default \
+  --node-id hello-world \
   --operation handle_message \
   --payload '{"input":"Hello from hello-world!"}' \
   --routing-out \
   --local-wasm components/hello-world/target/wasm32-wasip2/release/hello_world.wasm
 ```
 
-This inserts a `hello-world` node (ordering preserved and derived from the component name) and writes a sidecar `docs/examples/hello_with_component.ygtc.resolve.json` that binds the node to your local wasm (add `--pin` to hash it). The resulting flow looks like:
+This inserts a `hello-world` node (ordering preserved) and writes a sidecar `docs/examples/hello_with_component.ygtc.resolve.json` that binds the node to your local wasm (add `--pin` to hash it). The resulting flow looks like:
 
 ```yaml
 id: hello-component
@@ -78,7 +78,8 @@ nodes:
 ## Use public components (remote + pin)
 
 ```bash
-greentic-flow add-step --flow flows/main.ygtc --mode default \
+greentic-flow add-step --flow flows/main.ygtc \
+  --node-id templates \
   --operation run --payload '{}' \
   --routing-out \
   --component oci://ghcr.io/greentic-ai/components/templates:0.1.2 \

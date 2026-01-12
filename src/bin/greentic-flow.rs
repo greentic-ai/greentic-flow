@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs,
     io::{self, Read, Write},
@@ -17,7 +18,7 @@ use greentic_flow::{
     add_step::{
         AddStepSpec, apply_and_validate,
         modes::{AddStepModeInput, materialize_node},
-        plan_add_step,
+        normalize_node_id_hint, plan_add_step,
     },
     component_catalog::ManifestCatalog,
     error::FlowError,
@@ -137,8 +138,8 @@ struct UpdateStepArgs {
     /// Node id to update.
     #[arg(long = "step")]
     step: String,
-    /// Mode: config (default) or default.
-    #[arg(long = "mode", default_value = "config", value_parser = ["config", "default"])]
+    /// Mode: default (default) or config.
+    #[arg(long = "mode", default_value = "default", value_parser = ["config", "default"])]
     mode: String,
     /// Optional new operation name (defaults to existing op key).
     #[arg(long = "operation")]
@@ -155,7 +156,7 @@ struct UpdateStepArgs {
     /// Non-interactive mode (merge answers/prefill; fail if required missing).
     #[arg(long = "non-interactive")]
     non_interactive: bool,
-    /// Optional explicit component id (not yet used; reserved for future resolution).
+    /// Optional component reference (oci://, repo://, store://).
     #[arg(long = "component")]
     component: Option<String>,
     /// Show the updated flow without writing it.
@@ -409,6 +410,19 @@ fn lint_file(
     ) {
         Ok(result) => {
             if result.lint_errors.is_empty() {
+                if result.bundle.kind != "component-config" {
+                    let sync = sync_sidecar_for_flow(path, &result.flow)?;
+                    if !sync.missing.is_empty() {
+                        eprintln!(
+                            "WARN {}: missing sidecar entries for nodes: {}",
+                            path.display(),
+                            sync.missing.join(", ")
+                        );
+                    }
+                    if sync.updated {
+                        println!("Updated sidecar {}", sync.path.display());
+                    }
+                }
                 println!("OK  {} ({})", path.display(), result.bundle.id);
             } else {
                 *failures += 1;
@@ -428,6 +442,7 @@ fn lint_file(
 
 struct LintResult {
     bundle: FlowBundle,
+    flow: greentic_types::Flow,
     lint_errors: Vec<String>,
 }
 
@@ -454,6 +469,7 @@ fn lint_flow(
     };
     Ok(LintResult {
         bundle,
+        flow,
         lint_errors,
     })
 }
@@ -649,7 +665,7 @@ struct AddStepArgs {
     #[arg(long = "after")]
     after: Option<String>,
     /// How to source the node to insert.
-    #[arg(long = "mode", value_enum)]
+    #[arg(long = "mode", value_enum, default_value = "default")]
     mode: AddStepMode,
     /// Optional pack alias for the new node.
     #[arg(long = "pack-alias")]
@@ -702,8 +718,8 @@ struct AddStepArgs {
     /// Optional component manifest paths for catalog validation.
     #[arg(long = "manifest")]
     manifests: Vec<PathBuf>,
-    /// Optional explicit node id hint.
-    #[arg(long = "node-id")]
+    /// Required node id.
+    #[arg(long = "node-id", required = true)]
     node_id: Option<String>,
     /// Remote component reference (oci://, repo://, store://, etc.) for sidecar binding.
     #[arg(long = "component")]
@@ -870,6 +886,9 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
     if node_id_hint.is_none() {
         node_id_hint = hint;
     }
+    if args.node_id.is_none() {
+        node_id_hint = normalize_node_id_hint(node_id_hint, &node_value);
+    }
 
     let spec = AddStepSpec {
         after: args.after.clone(),
@@ -921,6 +940,9 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
 
 fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
     let (_sidecar_path, sidecar) = ensure_sidecar(&args.flow_path)?;
+    if let Some(component) = args.component.as_deref() {
+        validate_component_ref(component)?;
+    }
     let sidecar_entry = sidecar.nodes.get(&args.step).ok_or_else(|| {
         anyhow::anyhow!(
             "no sidecar mapping for node '{}'; run greentic-flow bind-component or re-add the step with --component/--local-wasm",
@@ -1193,6 +1215,76 @@ fn write_sidecar(path: &Path, doc: &FlowResolveV1) -> Result<()> {
     write_flow_resolve(path, doc).map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
+struct SidecarSync {
+    path: PathBuf,
+    updated: bool,
+    missing: Vec<String>,
+}
+
+fn sync_sidecar_for_flow(flow_path: &Path, flow: &greentic_types::Flow) -> Result<SidecarSync> {
+    let sidecar_path = sidecar_path_for_flow(flow_path);
+    let flow_name = flow_path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "flow.ygtc".to_string());
+    let node_ids: BTreeSet<String> = flow.nodes.keys().map(|id| id.to_string()).collect();
+
+    if !sidecar_path.exists() {
+        if node_ids.is_empty() {
+            let doc = FlowResolveV1 {
+                schema_version: FLOW_RESOLVE_SCHEMA_VERSION,
+                flow: flow_name,
+                nodes: BTreeMap::new(),
+            };
+            write_sidecar(&sidecar_path, &doc)?;
+            return Ok(SidecarSync {
+                path: sidecar_path,
+                updated: true,
+                missing: Vec::new(),
+            });
+        }
+        return Ok(SidecarSync {
+            path: sidecar_path,
+            updated: false,
+            missing: node_ids.into_iter().collect(),
+        });
+    }
+
+    let mut doc = read_flow_resolve(&sidecar_path).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let mut updated = false;
+    if doc.flow != flow_name {
+        doc.flow = flow_name;
+        updated = true;
+    }
+
+    let mut missing = Vec::new();
+    for id in &node_ids {
+        if !doc.nodes.contains_key(id) {
+            missing.push(id.clone());
+        }
+    }
+
+    let mut filtered = BTreeMap::new();
+    for (id, entry) in doc.nodes.iter() {
+        if node_ids.contains(id) {
+            filtered.insert(id.clone(), entry.clone());
+        } else {
+            updated = true;
+        }
+    }
+
+    if updated {
+        doc.nodes = filtered;
+        write_sidecar(&sidecar_path, &doc)?;
+    }
+
+    Ok(SidecarSync {
+        path: sidecar_path,
+        updated,
+        missing,
+    })
+}
+
 fn classify_remote_source(reference: &str, digest: Option<String>) -> ComponentSourceRefV1 {
     if reference.starts_with("repo://") {
         ComponentSourceRefV1::Repo {
@@ -1212,6 +1304,48 @@ fn classify_remote_source(reference: &str, digest: Option<String>) -> ComponentS
             digest,
         }
     }
+}
+
+fn validate_component_ref(reference: &str) -> Result<()> {
+    if reference.starts_with("oci://") {
+        return validate_oci_reference(reference);
+    }
+    if reference.starts_with("repo://") || reference.starts_with("store://") {
+        let rest = reference
+            .split_once("://")
+            .map(|(_, tail)| tail)
+            .unwrap_or("")
+            .trim();
+        if rest.is_empty() {
+            anyhow::bail!("--component must include a reference after the scheme");
+        }
+        return Ok(());
+    }
+    anyhow::bail!("--component must start with oci://, repo://, or store://");
+}
+
+fn validate_oci_reference(reference: &str) -> Result<()> {
+    let rest = reference.strip_prefix("oci://").unwrap_or("").trim();
+    if rest.is_empty() {
+        anyhow::bail!("oci:// references must include a registry host and repository");
+    }
+    let mut parts = rest.splitn(2, '/');
+    let host = parts.next().unwrap_or("").trim();
+    let repo = parts.next().unwrap_or("").trim();
+    if host.is_empty() || repo.is_empty() {
+        anyhow::bail!("oci:// references must be in the form oci://<host>/<repo>");
+    }
+    if host == "localhost"
+        || host.starts_with("localhost:")
+        || host.starts_with("127.")
+        || host.starts_with("0.")
+    {
+        anyhow::bail!("oci:// references must use a public registry host");
+    }
+    if !host.contains('.') {
+        anyhow::bail!("oci:// references must include a public registry host");
+    }
+    Ok(())
 }
 
 fn compute_local_digest(path: &Path) -> Result<String> {
@@ -1265,6 +1399,7 @@ fn resolve_component_source_inputs(
     }
 
     if let Some(reference) = component_ref {
+        validate_component_ref(reference)?;
         let digest = if pin {
             Some(resolve_remote_digest(reference)?)
         } else {
