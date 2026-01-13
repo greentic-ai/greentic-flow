@@ -130,6 +130,44 @@ nodes:
 }
 
 #[test]
+fn add_step_requires_routing() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    qa.process:
+      payload: true
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("next")
+        .arg("--operation")
+        .arg("handle_message")
+        .arg("--payload")
+        .arg(r#"{"msg":"hi"}"#)
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("ADD_STEP_ROUTING_MISSING"));
+}
+
+#[test]
 fn add_step_creates_sidecar_local() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
@@ -180,7 +218,63 @@ nodes:
             .and_then(|s| s.get("path"))
             .and_then(JsonValue::as_str)
             .unwrap(),
-        "comp.wasm"
+        "file://comp.wasm"
+    );
+}
+
+#[test]
+fn add_step_local_wasm_is_relativized_from_flow_dir() {
+    let dir = tempdir().unwrap();
+    let other_dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(other_dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("comp")
+        .arg("--operation")
+        .arg("handle_message")
+        .arg("--payload")
+        .arg(r#"{"msg":"hi"}"#)
+        .arg("--local-wasm")
+        .arg(&wasm_path)
+        .arg("--after")
+        .arg("start")
+        .arg("--write")
+        .assert()
+        .success();
+
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let sidecar: JsonValue =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    let nodes = sidecar.get("nodes").and_then(JsonValue::as_object).unwrap();
+    let entry = nodes.values().next().unwrap();
+    assert_eq!(
+        entry
+            .get("source")
+            .and_then(|s| s.get("path"))
+            .and_then(JsonValue::as_str)
+            .unwrap(),
+        "file://comp.wasm"
     );
 }
 
@@ -1098,8 +1192,7 @@ nodes:
         .arg("hello")
         .arg("--answers")
         .arg(r#"{"field":"new","extra":1}"#)
-        .arg("--routing")
-        .arg("reply")
+        .arg("--routing-reply")
         .arg("--write")
         .assert()
         .success();

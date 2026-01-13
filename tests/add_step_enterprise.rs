@@ -351,15 +351,16 @@ nodes: {}
         node_id_hint: None,
         node: json!({
             "ai.greentic.echo": {},
-            "routing": [ { "to": NEXT_NODE_PLACEHOLDER } ]
+            "routing": [ { "out": true } ]
         }),
         allow_cycles: false,
-        require_placeholder: true,
+        require_placeholder: false,
     };
     let plan = plan_add_step(&ir, spec, &catalog).expect("plan");
     let updated = apply_and_validate(&ir, plan, &catalog, false).expect("apply");
     assert_eq!(updated.nodes.len(), 1);
     let (id, node) = updated.nodes.get_index(0).unwrap();
     assert_eq!(updated.entrypoints.get("default"), Some(id));
-    assert_eq!(node.routing.len(), 0);
+    assert_eq!(node.routing.len(), 1);
+    assert!(node.routing[0].out);
 }

@@ -202,6 +202,14 @@ pub fn plan_add_step(
         }]
     })?;
 
+    if routing.is_empty() {
+        return Err(vec![Diagnostic {
+            code: "ADD_STEP_ROUTING_MISSING",
+            message: "add-step requires at least one routing target; use --routing-* or include routing in config flow output".to_string(),
+            location: Some(format!("nodes.{new_node_id}.routing")),
+        }]);
+    }
+
     let new_node = NodeIr {
         id: new_node_id.clone(),
         operation: normalized.operation.clone(),

@@ -87,6 +87,7 @@ Routing flags (no JSON needed):
 
 Sidecar expectations:
 - `--component` accepts `oci://`, `repo://`, or `store://` references. `oci://` must point to a public registry.
+- Local wasm paths are stored as `file://<relative/path>` from the flow directory in the sidecar.
 - `--pin` hashes local wasm or resolves remote tags to digests; stored in `*.ygtc.resolve.json`.
 
 Safety/inspection:
@@ -97,10 +98,10 @@ Re-materialize an existing node using its sidecar binding. Prefills with current
 
 ```
 greentic-flow update-step --flow flows/main.ygtc --step hello \
-  --answers '{"input":"hi again"}' --routing reply
+  --answers '{"input":"hi again"}' --routing-reply
 ```
 
-Requires a sidecar entry for the node; errors if missing (suggests `bind-component` or re-run add-step). `--non-interactive` merges provided answers/prefill and fails if required fields are still missing. `--operation` can rename the op key.
+Requires a sidecar entry for the node; errors if missing (suggests `bind-component` or re-run add-step). `--non-interactive` merges provided answers/prefill and fails if required fields are still missing. `--operation` can rename the op key. Use `--routing-out`, `--routing-reply`, `--routing-next`, `--routing-multi-to`, or `--routing-json` to override routing.
 
 ### delete-step
 Remove a node and optionally splice predecessors to its routing.

@@ -62,6 +62,8 @@ greentic-flow add-step --flow hello.ygtc \
 
 This inserts a `hello-world` node (ordering preserved) and writes a sidecar `docs/examples/hello_with_component.ygtc.resolve.json` that binds the node to your local wasm (add `--pin` to hash it). The resulting flow looks like:
 
+Local wasm bindings are stored in the sidecar as `file://<relative/path>` from the flow directory.
+
 ```yaml
 id: hello-component
 type: messaging

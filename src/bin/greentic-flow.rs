@@ -34,6 +34,7 @@ use greentic_types::flow_resolve::{
     read_flow_resolve, sidecar_path_for_flow, write_flow_resolve,
 };
 use indexmap::IndexMap;
+use pathdiff::diff_paths;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 #[derive(Parser, Debug)]
@@ -144,9 +145,21 @@ struct UpdateStepArgs {
     /// Optional new operation name (defaults to existing op key).
     #[arg(long = "operation")]
     operation: Option<String>,
-    /// Optional routing override: out|reply or JSON array.
-    #[arg(long = "routing")]
-    routing: Option<String>,
+    /// Routing shorthand: make the node terminal (out).
+    #[arg(long = "routing-out", conflicts_with_all = ["routing_reply", "routing_next", "routing_multi_to", "routing_json"])]
+    routing_out: bool,
+    /// Routing shorthand: reply to origin.
+    #[arg(long = "routing-reply", conflicts_with_all = ["routing_out", "routing_next", "routing_multi_to", "routing_json"])]
+    routing_reply: bool,
+    /// Route to a specific node id.
+    #[arg(long = "routing-next", conflicts_with_all = ["routing_out", "routing_reply", "routing_multi_to", "routing_json"])]
+    routing_next: Option<String>,
+    /// Route to multiple node ids (comma-separated).
+    #[arg(long = "routing-multi-to", conflicts_with_all = ["routing_out", "routing_reply", "routing_next", "routing_json"])]
+    routing_multi_to: Option<String>,
+    /// Explicit routing JSON file (escape hatch).
+    #[arg(long = "routing-json", conflicts_with_all = ["routing_out", "routing_reply", "routing_next", "routing_multi_to"])]
+    routing_json: Option<PathBuf>,
     /// Answers JSON/YAML string to merge with existing payload.
     #[arg(long = "answers")]
     answers: Option<String>,
@@ -872,6 +885,54 @@ fn build_routing_value(args: &AddStepArgs) -> Result<(Option<serde_json::Value>,
     Ok((Some(placeholder), true))
 }
 
+fn build_update_routing(
+    args: &UpdateStepArgs,
+) -> Result<Option<Vec<greentic_flow::flow_ir::Route>>> {
+    if let Some(path) = &args.routing_json {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("read routing json {}", path.display()))?;
+        let routes = parse_routing_arg(&text)?;
+        return Ok(Some(routes));
+    }
+    if args.routing_out {
+        return Ok(Some(vec![greentic_flow::flow_ir::Route {
+            out: true,
+            ..greentic_flow::flow_ir::Route::default()
+        }]));
+    }
+    if args.routing_reply {
+        return Ok(Some(vec![greentic_flow::flow_ir::Route {
+            reply: true,
+            ..greentic_flow::flow_ir::Route::default()
+        }]));
+    }
+    if let Some(next) = &args.routing_next {
+        return Ok(Some(vec![greentic_flow::flow_ir::Route {
+            to: Some(next.clone()),
+            ..greentic_flow::flow_ir::Route::default()
+        }]));
+    }
+    if let Some(multi) = &args.routing_multi_to {
+        let targets: Vec<_> = multi
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if targets.is_empty() {
+            anyhow::bail!("--routing-multi-to requires at least one target");
+        }
+        let routes = targets
+            .into_iter()
+            .map(|t| greentic_flow::flow_ir::Route {
+                to: Some(t.to_string()),
+                ..greentic_flow::flow_ir::Route::default()
+            })
+            .collect();
+        return Ok(Some(routes));
+    }
+    Ok(None)
+}
+
 fn infer_node_id_hint(args: &AddStepArgs) -> Option<String> {
     if let Some(explicit) = args.node_id.clone() {
         return Some(explicit);
@@ -1056,8 +1117,8 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
         .operation
         .clone()
         .unwrap_or_else(|| node.operation.clone());
-    let new_routing = if let Some(r) = args.routing.as_ref() {
-        parse_routing_arg(r)?
+    let new_routing = if let Some(routing) = build_update_routing(&args)? {
+        routing
     } else {
         node.routing.clone()
     };
@@ -1264,7 +1325,7 @@ fn parse_routing_arg(raw: &str) -> Result<Vec<greentic_flow::flow_ir::Route>> {
         }]);
     }
     let routes: Vec<greentic_flow::flow_ir::Route> =
-        serde_json::from_str(raw).context("parse --routing as JSON array or shorthand string")?;
+        serde_json::from_str(raw).context("parse routing as JSON array or shorthand string")?;
     Ok(routes)
 }
 
@@ -1516,6 +1577,43 @@ fn resolve_remote_digest(reference: &str) -> Result<String> {
     Ok(resolved.digest)
 }
 
+fn normalize_local_wasm_path(local: &Path, flow_path: &Path) -> Result<(PathBuf, String)> {
+    let raw = local.to_string_lossy();
+    let trimmed = raw.strip_prefix("file://").unwrap_or(&raw);
+    let raw_path = PathBuf::from(trimmed);
+    let flow_dir = flow_path.parent().unwrap_or_else(|| Path::new("."));
+    let abs_path = if raw_path.is_absolute() {
+        raw_path
+    } else {
+        flow_dir.join(raw_path)
+    };
+    let rel_path = diff_paths(&abs_path, flow_dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "failed to compute a relative path from {} to {}",
+            flow_dir.display(),
+            abs_path.display()
+        )
+    })?;
+    let rel_str = rel_path.to_string_lossy().to_string();
+    if rel_str.trim().is_empty() {
+        anyhow::bail!("local wasm path resolves to an empty relative path");
+    }
+    Ok((abs_path, format!("file://{rel_str}")))
+}
+
+fn local_path_from_sidecar(path: &str, flow_path: &Path) -> PathBuf {
+    let trimmed = path.strip_prefix("file://").unwrap_or(path);
+    let raw = PathBuf::from(trimmed);
+    if raw.is_absolute() {
+        raw
+    } else {
+        flow_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(raw)
+    }
+}
+
 fn resolve_component_source_inputs(
     local_wasm: Option<&PathBuf>,
     component_ref: Option<&String>,
@@ -1523,21 +1621,14 @@ fn resolve_component_source_inputs(
     flow_path: &Path,
 ) -> Result<(ComponentSourceRefV1, Option<ResolveModeV1>)> {
     if let Some(local) = local_wasm {
-        if local.is_absolute() {
-            anyhow::bail!("--local-wasm must be a relative path to the flow file");
-        }
+        let (abs_path, uri_path) = normalize_local_wasm_path(local, flow_path)?;
         let digest = if pin {
-            Some(compute_local_digest(
-                &flow_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(local),
-            )?)
+            Some(compute_local_digest(&abs_path)?)
         } else {
             None
         };
         let source = ComponentSourceRefV1::Local {
-            path: local.to_string_lossy().to_string(),
+            path: uri_path,
             digest: digest.clone(),
         };
         let mode = digest.as_ref().map(|_| ResolveModeV1::Pinned);
@@ -1562,10 +1653,7 @@ fn resolve_component_source_inputs(
 fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Path) -> Result<()> {
     match source {
         ComponentSourceRefV1::Local { path, .. } => {
-            let abs = flow_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(path);
+            let abs = local_path_from_sidecar(path, flow_path);
             if !abs.exists() {
                 anyhow::bail!(
                     "local wasm for node missing at {}; rebuild component or update sidecar",
@@ -1604,10 +1692,7 @@ fn load_component_payload(
 ) -> Result<Option<serde_json::Value>> {
     ensure_sidecar_source_available(source, flow_path)?;
     let manifest_path = match source {
-        ComponentSourceRefV1::Local { path, .. } => flow_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(path)
+        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)
             .parent()
             .map(|p| p.join("component.manifest.json"))
             .unwrap_or_else(|| {
