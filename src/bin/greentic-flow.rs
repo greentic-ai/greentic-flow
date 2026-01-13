@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     ffi::OsStr,
     fs,
     io::{self, Read, Write},
@@ -256,6 +256,7 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
             &schema_label,
             &schema_path,
             registry.as_ref(),
+            true,
             &mut failures,
         )?;
     }
@@ -355,6 +356,7 @@ fn lint_path(
     schema_label: &str,
     schema_path: &Path,
     registry: Option<&AdapterCatalog>,
+    interactive: bool,
     failures: &mut usize,
 ) -> Result<()> {
     if path.is_file() {
@@ -364,6 +366,7 @@ fn lint_path(
             schema_label,
             schema_path,
             registry,
+            interactive,
             failures,
         )?;
     } else if path.is_dir() {
@@ -378,6 +381,7 @@ fn lint_path(
                 schema_label,
                 schema_path,
                 registry,
+                interactive,
                 failures,
             )?;
         }
@@ -391,6 +395,7 @@ fn lint_file(
     schema_label: &str,
     schema_path: &Path,
     registry: Option<&AdapterCatalog>,
+    interactive: bool,
     failures: &mut usize,
 ) -> Result<()> {
     if path.extension() != Some(OsStr::new("ygtc")) {
@@ -409,21 +414,47 @@ fn lint_file(
         registry,
     ) {
         Ok(result) => {
+            let mut had_errors = false;
             if result.lint_errors.is_empty() {
                 if result.bundle.kind != "component-config" {
-                    let sync = sync_sidecar_for_flow(path, &result.flow)?;
-                    if !sync.missing.is_empty() {
+                    let validation =
+                        validate_sidecar_for_flow(path, &result.flow, interactive, true)?;
+                    let mut sidecar_error = false;
+                    if !validation.missing.is_empty() {
                         eprintln!(
-                            "WARN {}: missing sidecar entries for nodes: {}",
+                            "ERR  {}: missing sidecar entries for nodes: {}",
                             path.display(),
-                            sync.missing.join(", ")
+                            validation.missing.join(", ")
                         );
+                        sidecar_error = true;
                     }
-                    if sync.updated {
-                        println!("Updated sidecar {}", sync.path.display());
+                    if !validation.extra.is_empty() {
+                        eprintln!(
+                            "ERR  {}: unused sidecar entries: {}",
+                            path.display(),
+                            validation.extra.join(", ")
+                        );
+                        sidecar_error = true;
+                    }
+                    if !validation.invalid.is_empty() {
+                        eprintln!(
+                            "ERR  {}: invalid sidecar entries: {}",
+                            path.display(),
+                            validation.invalid.join(", ")
+                        );
+                        sidecar_error = true;
+                    }
+                    if sidecar_error {
+                        *failures += 1;
+                        had_errors = true;
+                    }
+                    if validation.updated {
+                        println!("Updated sidecar {}", validation.path.display());
                     }
                 }
-                println!("OK  {} ({})", path.display(), result.bundle.id);
+                if !had_errors {
+                    println!("OK  {} ({})", path.display(), result.bundle.id);
+                }
             } else {
                 *failures += 1;
                 eprintln!("ERR {}:", path.display());
@@ -511,19 +542,56 @@ fn run_json(
         )
     };
 
-    let output = match lint_flow(
+    let lint_result = lint_flow(
         &content,
         source_path,
         schema_text,
         schema_label,
         schema_path,
         registry,
-    ) {
+    );
+
+    let output = match lint_result {
         Ok(result) => {
-            if result.lint_errors.is_empty() {
-                LintJsonOutput::success(result.bundle)
-            } else {
+            if !result.lint_errors.is_empty() {
                 LintJsonOutput::lint_failure(result.lint_errors, Some(source_display.clone()))
+            } else if let Some(path) = source_path
+                && path.exists()
+            {
+                if result.bundle.kind == "component-config" {
+                    LintJsonOutput::success(result.bundle)
+                } else {
+                    let validation = validate_sidecar_for_flow(path, &result.flow, false, false)?;
+                    let mut errors = Vec::new();
+                    if !validation.missing.is_empty() {
+                        errors.push(format!(
+                            "missing sidecar entries for nodes: {}",
+                            validation.missing.join(", ")
+                        ));
+                    }
+                    if !validation.extra.is_empty() {
+                        errors.push(format!(
+                            "unused sidecar entries: {}",
+                            validation.extra.join(", ")
+                        ));
+                    }
+                    if !validation.invalid.is_empty() {
+                        errors.push(format!(
+                            "invalid sidecar entries: {}",
+                            validation.invalid.join(", ")
+                        ));
+                    }
+                    if errors.is_empty() {
+                        LintJsonOutput::success(result.bundle)
+                    } else {
+                        LintJsonOutput::lint_failure(
+                            errors,
+                            Some(validation.path.display().to_string()),
+                        )
+                    }
+                }
+            } else {
+                LintJsonOutput::success(result.bundle)
             }
         }
         Err(err) => LintJsonOutput::error(err),
@@ -537,6 +605,22 @@ fn run_json(
     } else {
         Err(anyhow::anyhow!("validation failed"))
     }
+}
+
+fn confirm_delete_unused(path: &Path, unused: &[String]) -> Result<bool> {
+    eprintln!(
+        "Unused sidecar entries detected in {}: {}",
+        path.display(),
+        unused.join(", ")
+    );
+    eprint!("Delete unused sidecar entries? [y/N]: ");
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return Ok(false);
+    }
+    let response = input.trim().to_lowercase();
+    Ok(response == "y" || response == "yes")
 }
 
 fn read_stdin_flow() -> Result<String> {
@@ -1215,13 +1299,20 @@ fn write_sidecar(path: &Path, doc: &FlowResolveV1) -> Result<()> {
     write_flow_resolve(path, doc).map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-struct SidecarSync {
+struct SidecarValidation {
     path: PathBuf,
     updated: bool,
     missing: Vec<String>,
+    extra: Vec<String>,
+    invalid: Vec<String>,
 }
 
-fn sync_sidecar_for_flow(flow_path: &Path, flow: &greentic_types::Flow) -> Result<SidecarSync> {
+fn validate_sidecar_for_flow(
+    flow_path: &Path,
+    flow: &greentic_types::Flow,
+    prompt_unused: bool,
+    apply_updates: bool,
+) -> Result<SidecarValidation> {
     let sidecar_path = sidecar_path_for_flow(flow_path);
     let flow_name = flow_path
         .file_name()
@@ -1231,28 +1322,26 @@ fn sync_sidecar_for_flow(flow_path: &Path, flow: &greentic_types::Flow) -> Resul
 
     if !sidecar_path.exists() {
         if node_ids.is_empty() {
-            let doc = FlowResolveV1 {
-                schema_version: FLOW_RESOLVE_SCHEMA_VERSION,
-                flow: flow_name,
-                nodes: BTreeMap::new(),
-            };
-            write_sidecar(&sidecar_path, &doc)?;
-            return Ok(SidecarSync {
+            return Ok(SidecarValidation {
                 path: sidecar_path,
-                updated: true,
+                updated: false,
                 missing: Vec::new(),
+                extra: Vec::new(),
+                invalid: Vec::new(),
             });
         }
-        return Ok(SidecarSync {
+        return Ok(SidecarValidation {
             path: sidecar_path,
             updated: false,
             missing: node_ids.into_iter().collect(),
+            extra: Vec::new(),
+            invalid: Vec::new(),
         });
     }
 
     let mut doc = read_flow_resolve(&sidecar_path).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let mut updated = false;
-    if doc.flow != flow_name {
+    if apply_updates && doc.flow != flow_name {
         doc.flow = flow_name;
         updated = true;
     }
@@ -1264,24 +1353,38 @@ fn sync_sidecar_for_flow(flow_path: &Path, flow: &greentic_types::Flow) -> Resul
         }
     }
 
-    let mut filtered = BTreeMap::new();
-    for (id, entry) in doc.nodes.iter() {
-        if node_ids.contains(id) {
-            filtered.insert(id.clone(), entry.clone());
-        } else {
-            updated = true;
+    let mut extra = Vec::new();
+    for id in doc.nodes.keys() {
+        if !node_ids.contains(id) {
+            extra.push(id.clone());
         }
     }
 
-    if updated {
-        doc.nodes = filtered;
+    if prompt_unused && !extra.is_empty() && confirm_delete_unused(&sidecar_path, &extra)? {
+        for id in &extra {
+            doc.nodes.remove(id);
+        }
+        updated = true;
+        extra.clear();
+    }
+
+    let mut invalid = Vec::new();
+    for (id, entry) in &doc.nodes {
+        if let Err(err) = validate_sidecar_source(&entry.source, flow_path) {
+            invalid.push(format!("{id}: {err}"));
+        }
+    }
+
+    if apply_updates && updated {
         write_sidecar(&sidecar_path, &doc)?;
     }
 
-    Ok(SidecarSync {
+    Ok(SidecarValidation {
         path: sidecar_path,
         updated,
         missing,
+        extra,
+        invalid,
     })
 }
 
@@ -1344,6 +1447,49 @@ fn validate_oci_reference(reference: &str) -> Result<()> {
     }
     if !host.contains('.') {
         anyhow::bail!("oci:// references must include a public registry host");
+    }
+    Ok(())
+}
+
+fn validate_sidecar_source(source: &ComponentSourceRefV1, flow_path: &Path) -> Result<()> {
+    match source {
+        ComponentSourceRefV1::Local { path, .. } => {
+            if path.trim().is_empty() {
+                anyhow::bail!("local wasm path is empty");
+            }
+            let abs = flow_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(path);
+            if !abs.exists() {
+                anyhow::bail!("local wasm missing at {}", abs.display());
+            }
+        }
+        ComponentSourceRefV1::Oci { r#ref, .. } => {
+            if r#ref.trim().is_empty() {
+                anyhow::bail!("oci reference is empty");
+            }
+            if !r#ref.starts_with("oci://") {
+                anyhow::bail!("oci reference must start with oci://");
+            }
+            validate_oci_reference(r#ref)?;
+        }
+        ComponentSourceRefV1::Repo { r#ref, .. } => {
+            if r#ref.trim().is_empty() {
+                anyhow::bail!("repo reference is empty");
+            }
+            if !r#ref.starts_with("repo://") {
+                anyhow::bail!("repo reference must start with repo://");
+            }
+        }
+        ComponentSourceRefV1::Store { r#ref, .. } => {
+            if r#ref.trim().is_empty() {
+                anyhow::bail!("store reference is empty");
+            }
+            if !r#ref.starts_with("store://") {
+                anyhow::bail!("store reference must start with store://");
+            }
+        }
     }
     Ok(())
 }

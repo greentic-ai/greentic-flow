@@ -1,3 +1,4 @@
+use assert_cmd::Command as AssertCommand;
 use assert_cmd::prelude::*;
 use greentic_flow::loader::load_ygtc_from_path;
 use serde_json::Value as JsonValue;
@@ -893,6 +894,8 @@ fn doctor_prunes_sidecar_to_match_flow() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
     let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
     fs::write(
         &flow_path,
         r#"id: main
@@ -907,13 +910,14 @@ nodes:
     .unwrap();
     fs::write(
         &sidecar_path,
-        r#"{"schema_version":1,"flow":"old.ygtc","nodes":{"keep":{"source":{"kind":"local","path":"comp.wasm"}},"stale":{"source":{"kind":"local","path":"old.wasm"}}}}"#,
+        r#"{"schema_version":1,"flow":"old.ygtc","nodes":{"keep":{"source":{"kind":"local","path":"comp.wasm"}},"stale":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
     )
     .unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    AssertCommand::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
         .arg("doctor")
         .arg(&flow_path)
+        .write_stdin("y\n")
         .assert()
         .success();
 
@@ -926,6 +930,138 @@ nodes:
     let nodes = sidecar.get("nodes").and_then(JsonValue::as_object).unwrap();
     assert!(nodes.contains_key("keep"));
     assert!(!nodes.contains_key("stale"));
+}
+
+#[test]
+fn doctor_reports_unused_sidecar_when_denied() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  keep:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"keep":{"source":{"kind":"local","path":"comp.wasm"}},"stale":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
+
+    AssertCommand::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("doctor")
+        .arg(&flow_path)
+        .write_stdin("n\n")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unused sidecar entries"));
+
+    let sidecar: JsonValue =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    let nodes = sidecar.get("nodes").and_then(JsonValue::as_object).unwrap();
+    assert!(nodes.contains_key("stale"));
+}
+
+#[test]
+fn doctor_reports_invalid_sidecar_source() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"oci","ref":"oci://localhost/component:latest"}}}}"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid sidecar entries"));
+}
+
+#[test]
+fn doctor_reports_missing_sidecar_entries() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{}}"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing sidecar entries"));
+}
+
+#[test]
+fn doctor_reports_missing_local_wasm() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"missing.wasm"}}}}"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("invalid sidecar entries"));
 }
 
 #[test]

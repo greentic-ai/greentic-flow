@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "flow": "flow_ok.ygtc",
+  "nodes": {
+    "email_notify": {
+      "source": { "kind": "repo", "ref": "repo://placeholder/email_google" }
+    },
+    "in": {
+      "source": { "kind": "repo", "ref": "repo://placeholder/messaging_telegram" }
+    }
+  }
+}

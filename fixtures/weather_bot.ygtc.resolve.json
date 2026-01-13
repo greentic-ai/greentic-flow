@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "flow": "weather_bot.ygtc",
+  "nodes": {
+    "forecast_weather": {
+      "source": { "kind": "repo", "ref": "repo://placeholder/weather_api" }
+    },
+    "in": { "source": { "kind": "repo", "ref": "repo://placeholder/qa_process" } },
+    "weather_text": {
+      "source": { "kind": "repo", "ref": "repo://placeholder/templating" }
+    }
+  }
+}
