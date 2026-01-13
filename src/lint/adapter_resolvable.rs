@@ -9,7 +9,11 @@ impl AdapterResolvableRule {
         let mut errors = Vec::new();
         for (idx, (node_id, node)) in flow.nodes.iter().enumerate() {
             let comp_str = if let Some(op) = &node.component.operation {
-                format!("{}.{}", node.component.id, op)
+                if node.component.id.as_str() == "component.exec" {
+                    op.clone()
+                } else {
+                    format!("{}.{}", node.component.id, op)
+                }
             } else {
                 node.component.id.to_string()
             };

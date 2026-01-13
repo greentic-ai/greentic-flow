@@ -16,7 +16,8 @@ fn load_weather_ir_and_resolve_params() {
         .nodes
         .get(&NodeId::new("forecast_weather").unwrap())
         .unwrap();
-    assert_eq!(fw.component.id.as_str(), "mcp.exec");
+    assert_eq!(fw.component.id.as_str(), "component.exec");
+    assert_eq!(fw.component.operation.as_deref(), Some("mcp.exec"));
 
     let resolved = resolve_parameters(
         &fw.input.mapping,
@@ -111,4 +112,26 @@ nodes:
         Routing::Reply => {}
         other => panic!("expected reply routing, got {other:?}"),
     }
+}
+
+#[test]
+fn v2_dotted_operation_stays_as_operation() {
+    let yaml = r#"
+id: dotted_op
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    templating.handlebars:
+      text: "hi"
+    routing: out
+"#;
+    let doc = load_ygtc_from_str(yaml).unwrap();
+    let flow = compile_flow(doc).unwrap();
+    let node = flow.nodes.get(&NodeId::new("start").unwrap()).unwrap();
+    assert_eq!(node.component.id.as_str(), "component.exec");
+    assert_eq!(
+        node.component.operation.as_deref(),
+        Some("templating.handlebars")
+    );
 }

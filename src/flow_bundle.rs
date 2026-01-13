@@ -68,10 +68,18 @@ pub fn extract_component_pins(flow: &Flow) -> Vec<(NodeId, ComponentPin)> {
     flow.nodes
         .iter()
         .map(|(node_id, node)| {
+            let component_name = if node.component.id.as_str() == "component.exec" {
+                node.component
+                    .operation
+                    .clone()
+                    .unwrap_or_else(|| "component.exec".to_string())
+            } else {
+                node.component.id.as_str().to_string()
+            };
             (
                 node_id.to_string(),
                 ComponentPin {
-                    name: node.component.id.as_str().to_string(),
+                    name: component_name,
                     version_req: "*".to_string(),
                 },
             )

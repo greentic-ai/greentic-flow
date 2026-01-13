@@ -6,5 +6,6 @@ fn ir_serializes() {
     let doc = load_ygtc_from_str(&yaml).unwrap();
     let flow = compile_flow(doc).unwrap();
     let json = serde_json::to_string(&flow).unwrap();
-    assert!(json.contains("\"id\":\"qa.process\""));
+    assert!(json.contains("\"id\":\"component.exec\""));
+    assert!(json.contains("\"operation\":\"qa.process\""));
 }

@@ -100,7 +100,7 @@ pub fn compile_flow(doc: FlowDoc) -> Result<Flow> {
             location: crate::error::FlowErrorLocation::at_path(format!("nodes.{node_id_str}")),
         })?;
         let is_builtin = matches!(operation.as_str(), "questions" | "template");
-        let is_legacy = doc.schema_version.unwrap_or(1) < 2 || operation.contains('.');
+        let is_legacy = doc.schema_version.unwrap_or(1) < 2;
         let (component_id, op_field) = if is_builtin || is_legacy {
             (operation.clone(), None)
         } else {
