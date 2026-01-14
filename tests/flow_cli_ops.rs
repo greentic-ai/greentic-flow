@@ -54,6 +54,7 @@ fn add_step_into_empty_flow_succeeds() {
     fs::write(&wasm_path, b"wasm-bytes").unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -105,6 +106,7 @@ nodes:
     .unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -149,6 +151,7 @@ nodes:
     .unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -187,6 +190,7 @@ nodes:
     fs::write(&wasm_path, b"wasm-bytes").unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -279,6 +283,124 @@ nodes:
 }
 
 #[test]
+fn add_step_local_wasm_relativizes_from_flow_dir_when_called_elsewhere() {
+    let dir = tempdir().unwrap();
+    let flow_dir = dir.path().join("flows");
+    let component_dir = dir.path().join("components/hello-world/target");
+    fs::create_dir_all(&flow_dir).unwrap();
+    fs::create_dir_all(&component_dir).unwrap();
+    let flow_path = flow_dir.join("main.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    let wasm_path = component_dir.join("component_hello_world.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("hello-world")
+        .arg("--operation")
+        .arg("handle_message")
+        .arg("--payload")
+        .arg(r#"{"msg":"hi"}"#)
+        .arg("--local-wasm")
+        .arg("components/hello-world/target/component_hello_world.wasm")
+        .arg("--after")
+        .arg("start")
+        .arg("--write")
+        .assert()
+        .success();
+
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let sidecar: JsonValue =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    let nodes = sidecar.get("nodes").and_then(JsonValue::as_object).unwrap();
+    let entry = nodes.values().next().unwrap();
+    assert_eq!(
+        entry
+            .get("source")
+            .and_then(|s| s.get("path"))
+            .and_then(JsonValue::as_str)
+            .unwrap(),
+        "file://../components/hello-world/target/component_hello_world.wasm"
+    );
+}
+
+#[test]
+fn add_step_local_wasm_relativizes_from_nested_flow_dir() {
+    let dir = tempdir().unwrap();
+    let flow_dir = dir.path().join("flow/flow-a");
+    let component_dir = dir.path().join("components/hello-world/target");
+    fs::create_dir_all(&flow_dir).unwrap();
+    fs::create_dir_all(&component_dir).unwrap();
+    let flow_path = flow_dir.join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    let wasm_path = component_dir.join("component_hello_world.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("hello-world")
+        .arg("--operation")
+        .arg("handle_message")
+        .arg("--payload")
+        .arg(r#"{"msg":"hi"}"#)
+        .arg("--local-wasm")
+        .arg("components/hello-world/target/component_hello_world.wasm")
+        .arg("--after")
+        .arg("start")
+        .arg("--write")
+        .assert()
+        .success();
+
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let sidecar: JsonValue =
+        serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+    let nodes = sidecar.get("nodes").and_then(JsonValue::as_object).unwrap();
+    let entry = nodes.values().next().unwrap();
+    assert_eq!(
+        entry
+            .get("source")
+            .and_then(|s| s.get("path"))
+            .and_then(JsonValue::as_str)
+            .unwrap(),
+        "file://../../components/hello-world/target/component_hello_world.wasm"
+    );
+}
+
+#[test]
 fn add_step_remote_pin_uses_env_digest() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
@@ -296,6 +418,7 @@ nodes:
     .unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -360,6 +483,7 @@ nodes:
     fs::write(&wasm_path, b"wasm-bytes").unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -440,6 +564,7 @@ nodes:
     fs::write(dir.path().join("comp.wasm"), b"bytes").unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -503,6 +628,7 @@ nodes:
     fs::write(dir.path().join("comp.wasm"), b"bytes").unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -569,6 +695,7 @@ nodes:
     fs::write(dir.path().join("comp.wasm"), b"bytes").unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -1156,6 +1283,39 @@ nodes:
         .assert()
         .failure()
         .stderr(predicates::str::contains("invalid sidecar entries"));
+}
+
+#[test]
+fn doctor_accepts_file_uri_local_wasm() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"file://comp.wasm"}}}}"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .success();
 }
 
 #[test]

@@ -1518,10 +1518,7 @@ fn validate_sidecar_source(source: &ComponentSourceRefV1, flow_path: &Path) -> R
             if path.trim().is_empty() {
                 anyhow::bail!("local wasm path is empty");
             }
-            let abs = flow_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(path);
+            let abs = local_path_from_sidecar(path, flow_path);
             if !abs.exists() {
                 anyhow::bail!("local wasm missing at {}", abs.display());
             }
@@ -1585,9 +1582,14 @@ fn normalize_local_wasm_path(local: &Path, flow_path: &Path) -> Result<(PathBuf,
     let abs_path = if raw_path.is_absolute() {
         raw_path
     } else {
-        flow_dir.join(raw_path)
+        let cwd = std::env::current_dir().context("resolve current directory")?;
+        cwd.join(raw_path)
     };
-    let rel_path = diff_paths(&abs_path, flow_dir).ok_or_else(|| {
+    let abs_path = fs::canonicalize(&abs_path)
+        .with_context(|| format!("resolve local wasm path {}", abs_path.display()))?;
+    let flow_dir = fs::canonicalize(flow_dir)
+        .with_context(|| format!("resolve flow directory {}", flow_dir.display()))?;
+    let rel_path = diff_paths(&abs_path, &flow_dir).ok_or_else(|| {
         anyhow::anyhow!(
             "failed to compute a relative path from {} to {}",
             flow_dir.display(),

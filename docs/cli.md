@@ -88,6 +88,7 @@ Routing flags (no JSON needed):
 Sidecar expectations:
 - `--component` accepts `oci://`, `repo://`, or `store://` references. `oci://` must point to a public registry.
 - Local wasm paths are stored as `file://<relative/path>` from the flow directory in the sidecar.
+- Relative `--local-wasm` inputs are resolved from your current working directory, then normalized to the flow directory.
 - `--pin` hashes local wasm or resolves remote tags to digests; stored in `*.ygtc.resolve.json`.
 
 Safety/inspection:
