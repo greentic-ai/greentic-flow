@@ -28,6 +28,7 @@ use greentic_flow::{
     lint::{lint_builtin_rules, lint_with_registry},
     loader::{load_ygtc_from_path, load_ygtc_from_str},
     registry::AdapterCatalog,
+    resolve_summary::{remove_flow_resolve_summary_node, write_flow_resolve_summary_for_node},
 };
 use greentic_types::flow_resolve::{
     ComponentSourceRefV1, FLOW_RESOLVE_SCHEMA_VERSION, FlowResolveV1, NodeResolveV1, ResolveModeV1,
@@ -1071,6 +1072,12 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
             },
         );
         write_sidecar(&sidecar_path, &sidecar)?;
+        if let Err(err) =
+            write_flow_resolve_summary_for_node(&args.flow_path, &inserted_id, &sidecar)
+                .with_context(|| format!("update resolve summary for {}", args.flow_path.display()))
+        {
+            eprintln!("warning: {err}");
+        }
         println!(
             "Inserted node after '{}' and wrote {}",
             args.after.unwrap_or_else(|| "<default anchor>".to_string()),
@@ -1134,6 +1141,11 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
     load_ygtc_from_str(&yaml)?; // schema validation
     if !args.dry_run {
         write_flow_file(&args.flow_path, &yaml, true)?;
+        if let Err(err) = write_flow_resolve_summary_for_node(&args.flow_path, &args.step, &sidecar)
+            .with_context(|| format!("update resolve summary for {}", args.flow_path.display()))
+        {
+            eprintln!("warning: {err}");
+        }
         println!(
             "Updated step '{}' in {}",
             args.step,
@@ -1222,6 +1234,11 @@ fn handle_delete_step(args: DeleteStepArgs) -> Result<()> {
         write_flow_file(&args.flow_path, &yaml, true)?;
         sidecar.nodes.remove(&target);
         write_sidecar(&sidecar_path, &sidecar)?;
+        if let Err(err) = remove_flow_resolve_summary_node(&args.flow_path, &target)
+            .with_context(|| format!("update resolve summary for {}", args.flow_path.display()))
+        {
+            eprintln!("warning: {err}");
+        }
         println!(
             "Deleted step '{}' from {}",
             target,
@@ -1257,6 +1274,11 @@ fn handle_bind_component(args: BindComponentArgs) -> Result<()> {
         .insert(args.step.clone(), NodeResolveV1 { source, mode });
     if args.write {
         write_sidecar(&sidecar_path, &sidecar)?;
+        if let Err(err) = write_flow_resolve_summary_for_node(&args.flow_path, &args.step, &sidecar)
+            .with_context(|| format!("update resolve summary for {}", args.flow_path.display()))
+        {
+            eprintln!("warning: {err}");
+        }
         println!(
             "Bound component for node '{}' in {}",
             args.step,

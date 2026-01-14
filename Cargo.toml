@@ -1,6 +1,6 @@
 [package]
 name = "greentic-flow"
-version = "0.4.28"
+version = "0.4.29"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
@@ -30,6 +30,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 blake3 = "1"
 pathdiff = "0.2"
 sha2 = "0.10"
+semver = "1"
 greentic-distributor-client = { version = "0.4", default-features = false, features = ["dist-client"] }
 
 [dev-dependencies]

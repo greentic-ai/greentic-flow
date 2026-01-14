@@ -18,6 +18,7 @@ pub mod model;
 pub mod path_safety;
 pub mod registry;
 pub mod resolve;
+pub mod resolve_summary;
 pub mod splice;
 pub mod util;
 
