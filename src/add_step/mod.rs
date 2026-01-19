@@ -439,7 +439,7 @@ pub fn add_step_from_config_flow(
         location: FlowErrorLocation::at_path(config_flow_path.display().to_string())
             .with_source_path(Some(config_flow_path)),
     })?;
-    let output = run_config_flow(&config_yaml, schema_path, answers)?;
+    let output = run_config_flow(&config_yaml, schema_path, answers, None)?;
     let node_id_hint = normalize_node_id_hint(Some(output.node_id.clone()), &output.node);
 
     let spec = AddStepSpec {

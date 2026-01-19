@@ -1,6 +1,7 @@
 use greentic_flow::{compile_flow, config_flow::run_config_flow, loader::load_ygtc_from_str};
 use greentic_types::NodeId;
 use serde_json::{Map, Value, json};
+use std::{fs, path::Path};
 
 #[test]
 fn config_flow_loads_and_emits_contract_payload() {
@@ -58,6 +59,7 @@ fn config_flow_harness_substitutes_state() {
         &yaml,
         std::path::Path::new("schemas/ygtc.flow.schema.json"),
         &answers,
+        None,
     )
     .unwrap();
 
@@ -102,6 +104,7 @@ nodes:
         yaml,
         std::path::Path::new("schemas/ygtc.flow.schema.json"),
         &answers,
+        None,
     );
     assert!(result.is_err(), "legacy tool nodes must be rejected");
 }
@@ -130,8 +133,51 @@ nodes:
         yaml,
         std::path::Path::new("schemas/ygtc.flow.schema.json"),
         &answers,
+        None,
     )
     .expect("config flow should normalize missing type");
 
     assert_eq!(output.node_id, "hello");
+}
+
+#[test]
+fn config_flow_template_branching_renders_json() {
+    let manifest_path = Path::new("tests/fixtures/manifests/component-conditional.manifest.json");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(manifest_path).unwrap()).unwrap();
+    let graph = manifest
+        .get("dev_flows")
+        .and_then(Value::as_object)
+        .and_then(|flows| flows.get("default"))
+        .and_then(Value::as_object)
+        .and_then(|flow| flow.get("graph"))
+        .cloned()
+        .expect("default dev_flow graph");
+    let yaml = serde_yaml_bw::to_string(&graph).unwrap();
+
+    let mut answers = Map::new();
+    answers.insert("card_source".to_string(), json!("inline"));
+    answers.insert("inline_json".to_string(), json!({ "title": "Custom" }));
+    answers.insert("needs_interaction".to_string(), json!(true));
+
+    let output = run_config_flow(
+        &yaml,
+        Path::new("schemas/ygtc.flow.schema.json"),
+        &answers,
+        Some("ai.greentic.conditional".to_string()),
+    )
+    .unwrap();
+
+    let card = output.node.get("card").and_then(Value::as_object).unwrap();
+    let card_spec = card.get("card_spec").and_then(Value::as_object).unwrap();
+    assert_eq!(
+        card_spec.get("inline_json"),
+        Some(&json!({ "title": "Custom" }))
+    );
+    let interaction = output
+        .node
+        .get("interaction")
+        .and_then(Value::as_object)
+        .unwrap();
+    assert_eq!(interaction.get("enabled"), Some(&json!(true)));
 }

@@ -60,12 +60,21 @@ Using dev_flows (config mode) for schema-valid payloads:
 ```
 greentic-flow add-step --flow flows/main.ygtc --mode config \
   --node-id hello-world \
-  --manifest components/hello-world/component.manifest.json \
+  --component oci://ghcr.io/greentic-ai/components/hello-world:latest --pin \
   --after start
 ```
 - Runs the component’s `dev_flows.default` config to emit a StepSpec with defaults and placeholder routing.
-- You can supply `--answers`/`--answers-file` to answer config questions non-interactively.
+- If the selected dev_flow defines questions, add-step prompts interactively unless you pass `--answers`/`--answers-file`.
+- `--answers`/`--answers-file` accept JSON objects keyed by question id; non-interactive mode fails if required answers are missing.
 - Still requires a source: add `--local-wasm ...` for local builds or `--component ... [--pin]` for remotes.
+- If you don’t pass `--config-flow` or `--manifest`, config mode reads `component.manifest.json` next to the local wasm or inside the cached remote component.
+
+Question definitions (component manifest):
+- `questions.fields` supports `type` (`string`, `bool`, `int`, `choice`), `default`, `required`, and `options` for choices.
+- Conditional prompts use `show_if`:
+  - Boolean: `"show_if": true|false`
+  - Equals: `"show_if": { "id": "mode", "equals": "asset" }`
+  - Hidden questions are not asked and are not required.
 
 Anchoring and placement:
 - `--after <node>` inserts immediately after that node.
@@ -103,6 +112,9 @@ greentic-flow update-step --flow flows/main.ygtc --step hello \
 ```
 
 Requires a sidecar entry for the node; errors if missing (suggests `bind-component` or re-run add-step). `--non-interactive` merges provided answers/prefill and fails if required fields are still missing. `--operation` can rename the op key. Use `--routing-out`, `--routing-reply`, `--routing-next`, `--routing-multi-to`, or `--routing-json` to override routing.
+
+Config mode reads `dev_flows.default` from the component manifest alongside the bound wasm (or cached remote component) to re-materialize the payload before applying overrides.
+- If the selected dev_flow defines questions, update-step prompts interactively for missing required values unless `--non-interactive` is set. `show_if` rules are honored.
 
 ### delete-step
 Remove a node and optionally splice predecessors to its routing.

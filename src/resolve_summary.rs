@@ -176,7 +176,7 @@ fn resolve_remote(
                 .digest
         }
     };
-    let wasm_path = if let Ok(path) = rt.block_on(client.fetch_digest(&digest)) {
+    let mut wasm_path = if let Ok(path) = rt.block_on(client.fetch_digest(&digest)) {
         path
     } else {
         let resolved = rt.block_on(client.ensure_cached(reference)).map_err(|e| {
@@ -189,6 +189,11 @@ fn resolve_remote(
             .cache_path
             .ok_or_else(|| anyhow!("component reference {} has no cache path", reference))?
     };
+    if let Some(cache_dir) = wasm_path.parent()
+        && let Some(manifest_wasm) = manifest_wasm_from_dir(cache_dir)?
+    {
+        wasm_path = manifest_wasm;
+    }
     let source_ref = match kind {
         RemoteKind::Oci => FlowResolveSummarySourceRefV1::Oci {
             r#ref: reference.to_string(),
@@ -201,6 +206,30 @@ fn resolve_remote(
         },
     };
     Ok((source_ref, wasm_path, digest))
+}
+
+fn manifest_wasm_from_dir(cache_dir: &Path) -> Result<Option<PathBuf>> {
+    let manifest_path = cache_dir.join("component.manifest.json");
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("read {}", manifest_path.display()))?;
+    let json: serde_json::Value =
+        serde_json::from_str(&raw).context("parse component.manifest.json")?;
+    let rel = json
+        .get("artifacts")
+        .and_then(|v| v.get("component_wasm"))
+        .and_then(|v| v.as_str());
+    let Some(rel) = rel else {
+        return Ok(None);
+    };
+    let candidate = cache_dir.join(rel);
+    if candidate.exists() {
+        Ok(Some(candidate))
+    } else {
+        Ok(None)
+    }
 }
 
 fn find_manifest_for_wasm(wasm_path: &Path) -> Result<PathBuf> {

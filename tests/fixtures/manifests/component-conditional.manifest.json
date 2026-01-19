@@ -1,0 +1,50 @@
+{
+  "id": "ai.greentic.conditional",
+  "dev_flows": {
+    "default": {
+      "graph": {
+        "id": "cfg",
+        "type": "component-config",
+        "start": "ask",
+        "nodes": {
+          "ask": {
+            "questions": {
+              "fields": [
+                {
+                  "id": "card_source",
+                  "prompt": "Card source",
+                  "type": "choice",
+                  "options": ["asset", "inline"],
+                  "default": "asset"
+                },
+                {
+                  "id": "asset_path",
+                  "prompt": "Asset path",
+                  "type": "string",
+                  "default": "cards/card.json",
+                  "show_if": { "id": "card_source", "equals": "asset" }
+                },
+                {
+                  "id": "inline_json",
+                  "prompt": "Inline JSON",
+                  "default": { "title": "Inline" },
+                  "show_if": { "id": "card_source", "equals": "inline" }
+                },
+                {
+                  "id": "needs_interaction",
+                  "prompt": "Needs interaction",
+                  "type": "bool",
+                  "default": false
+                }
+              ]
+            },
+            "routing": [{ "to": "emit" }]
+          },
+          "emit": {
+            "template": "{\n  \"node_id\": \"card1\",\n  \"node\": {\n    \"card\": {\n      \"card_source\": \"{{state.card_source}}\",\n      \"card_spec\": {\n        {{#ifEq state.card_source \"asset\"}}\n        \"asset_path\": {{default state.asset_path \"cards/card.json\"}}\n        {{else}}\n        \"inline_json\": {{json state.inline_json}}\n        {{/ifEq}}\n      }\n    },\n    \"interaction\": {\n      {{#if state.needs_interaction}}\n      \"enabled\": true\n      {{else}}\n      \"enabled\": false\n      {{/if}}\n    },\n    \"routing\": [\n      { \"to\": \"NEXT_NODE_PLACEHOLDER\" }\n    ]\n  }\n}\n"
+          }
+        }
+      }
+    }
+  }
+}

@@ -20,6 +20,7 @@ pub enum AddStepModeInput {
         config_flow: String,
         schema_path: Box<Path>,
         answers: Map<String, Value>,
+        manifest_id: Option<String>,
     },
 }
 
@@ -52,9 +53,10 @@ pub fn materialize_node(
             config_flow,
             schema_path,
             answers,
+            manifest_id,
         } => {
             let _doc = load_ygtc_from_str_with_schema(&config_flow, &schema_path)?; // schema validation
-            let output = run_config_flow(&config_flow, &schema_path, &answers)?;
+            let output = run_config_flow(&config_flow, &schema_path, &answers, manifest_id)?;
             let normalized = normalize_node_map(output.node.clone())?;
             let mut hint = Some(output.node_id.clone());
             if normalized.operation.is_empty() {

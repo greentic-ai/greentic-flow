@@ -18,15 +18,21 @@ use greentic_flow::{
     add_step::{
         AddStepSpec, apply_and_validate,
         modes::{AddStepModeInput, materialize_node},
+        normalize::normalize_node_map,
         normalize_node_id_hint, plan_add_step,
     },
     component_catalog::ManifestCatalog,
+    config_flow::run_config_flow,
     error::FlowError,
     flow_bundle::{FlowBundle, load_and_validate_bundle_with_schema_text},
     flow_ir::FlowIr,
     json_output::LintJsonOutput,
     lint::{lint_builtin_rules, lint_with_registry},
     loader::{load_ygtc_from_path, load_ygtc_from_str},
+    questions::{
+        Answers as QuestionAnswers, Question, apply_writes_to, extract_answers_from_payload,
+        extract_questions_from_flow, run_interactive_with_seed, validate_required,
+    },
     registry::AdapterCatalog,
     resolve_summary::{remove_flow_resolve_summary_node, write_flow_resolve_summary_for_node},
 };
@@ -656,6 +662,7 @@ fn write_stdout_line(line: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_answers_map;
     use super::resolve_config_flow;
     use serde_json::json;
     use std::path::PathBuf;
@@ -679,12 +686,32 @@ mod tests {
         std::fs::write(manifest_file.path(), manifest.to_string()).expect("write manifest");
 
         let (yaml, schema_path) =
-            resolve_config_flow(None, &[manifest_file.path().to_path_buf()]).expect("resolve");
+            resolve_config_flow(None, &[manifest_file.path().to_path_buf()], "default")
+                .expect("resolve");
         assert!(yaml.contains("id: cfg"));
         assert_eq!(
             schema_path,
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas/ygtc.flow.schema.json")
         );
+    }
+
+    #[test]
+    fn answers_merge_prefers_cli_over_file() {
+        let file = NamedTempFile::new().expect("temp file");
+        std::fs::write(file.path(), r#"{"value":"from-file","keep":1}"#).unwrap();
+        let merged = parse_answers_map(Some(r#"{"value":"from-cli"}"#), Some(file.path())).unwrap();
+        assert_eq!(
+            merged.get("value").and_then(|v| v.as_str()),
+            Some("from-cli")
+        );
+        assert_eq!(merged.get("keep").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    #[test]
+    fn answers_map_accepts_yaml() {
+        let merged = parse_answers_map(Some("value: hello\ncount: 2"), None).unwrap();
+        assert_eq!(merged.get("value").and_then(|v| v.as_str()), Some("hello"));
+        assert_eq!(merged.get("count").and_then(|v| v.as_i64()), Some(2));
     }
 }
 fn write_flow_file(path: &Path, content: &str, force: bool) -> Result<()> {
@@ -709,6 +736,7 @@ fn write_flow_file(path: &Path, content: &str, force: bool) -> Result<()> {
 fn resolve_config_flow(
     config_flow_arg: Option<PathBuf>,
     manifests: &[PathBuf],
+    flow_name: &str,
 ) -> Result<(String, PathBuf)> {
     if let Some(path) = config_flow_arg {
         let text = fs::read_to_string(&path)
@@ -718,19 +746,27 @@ fn resolve_config_flow(
 
     let manifest_path = manifests.first().ok_or_else(|| {
         anyhow::anyhow!(
-            "config mode requires --config-flow or at least one --manifest with dev_flows.default"
+            "config mode requires --config-flow or a component manifest with dev_flows.{}",
+            flow_name
         )
     })?;
+    resolve_config_flow_from_manifest(manifest_path, flow_name)
+}
+
+fn resolve_config_flow_from_manifest(
+    manifest_path: &Path,
+    flow_name: &str,
+) -> Result<(String, PathBuf)> {
     let manifest_text = fs::read_to_string(manifest_path)
         .with_context(|| format!("read manifest {}", manifest_path.display()))?;
     let manifest_json: serde_json::Value =
         serde_json::from_str(&manifest_text).context("parse manifest JSON")?;
     let default_graph = manifest_json
         .get("dev_flows")
-        .and_then(|v| v.get("default"))
+        .and_then(|v| v.get(flow_name))
         .and_then(|v| v.get("graph"))
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("manifest missing dev_flows.default.graph"))?;
+        .ok_or_else(|| anyhow::anyhow!("manifest missing dev_flows.{}.graph", flow_name))?;
     let mut graph = default_graph;
     if let Some(obj) = graph.as_object_mut()
         && !obj.contains_key("type")
@@ -746,6 +782,85 @@ fn resolve_config_flow(
     let schema_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas/ygtc.flow.schema.json");
     Ok((yaml, schema_path))
+}
+
+fn load_manifest_json(path: &Path) -> Result<serde_json::Value> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("read manifest {}", path.display()))?;
+    serde_json::from_str(&text).context("parse manifest JSON")
+}
+
+fn component_name_from_manifest(manifest: &serde_json::Value) -> Option<String> {
+    manifest
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn dev_flow_graph_from_manifest(
+    manifest: &serde_json::Value,
+    flow_name: &str,
+) -> Result<Option<serde_json::Value>> {
+    let Some(graph) = manifest
+        .get("dev_flows")
+        .and_then(|v| v.get(flow_name))
+        .and_then(|v| v.get("graph"))
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    Ok(Some(graph))
+}
+
+fn questions_from_manifest(manifest_path: &Path, flow_name: &str) -> Result<Vec<Question>> {
+    let manifest = load_manifest_json(manifest_path)?;
+    let Some(graph) = dev_flow_graph_from_manifest(&manifest, flow_name)? else {
+        return Ok(Vec::new());
+    };
+    extract_questions_from_flow(&graph)
+}
+
+fn questions_from_config_flow_text(text: &str) -> Result<Vec<Question>> {
+    let flow_value: serde_json::Value =
+        serde_yaml_bw::from_str(text).context("parse config flow as YAML")?;
+    extract_questions_from_flow(&flow_value)
+}
+
+fn answers_to_json_map(answers: QuestionAnswers) -> serde_json::Map<String, serde_json::Value> {
+    answers.into_iter().collect()
+}
+
+fn answers_to_value(answers: &QuestionAnswers) -> Option<serde_json::Value> {
+    if answers.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(
+            answers.clone().into_iter().collect(),
+        ))
+    }
+}
+
+fn wizard_header(component: &str, mode: &str) -> String {
+    format!("== {component} ({mode}) ==")
+}
+
+fn warn_unknown_keys(answers: &QuestionAnswers, questions: &[Question]) {
+    if questions.is_empty() || answers.is_empty() {
+        return;
+    }
+    let mut known = std::collections::BTreeSet::new();
+    for q in questions {
+        known.insert(q.id.as_str());
+    }
+    let mut unknown = Vec::new();
+    for key in answers.keys() {
+        if !known.contains(key.as_str()) {
+            unknown.push(key.clone());
+        }
+    }
+    if !unknown.is_empty() {
+        eprintln!("warning: unknown answer keys: {}", unknown.join(", "));
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -813,7 +928,7 @@ struct AddStepArgs {
     /// Validate only without writing output.
     #[arg(long = "validate-only")]
     validate_only: bool,
-    /// Optional component manifest paths for catalog validation.
+    /// Optional component manifest paths for catalog validation or config flow discovery.
     #[arg(long = "manifest")]
     manifests: Vec<PathBuf>,
     /// Required node id.
@@ -971,21 +1086,64 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
     )?;
     let doc = load_ygtc_from_path(&args.flow_path)?;
     let flow_ir = FlowIr::from_doc(doc)?;
+    let mut manifest_paths = args.manifests.clone();
+    if args.mode == AddStepMode::Config && args.config_flow.is_none() && manifest_paths.is_empty() {
+        let manifest_path = resolve_component_manifest_path(&component_source, &args.flow_path)?;
+        manifest_paths.push(manifest_path);
+    }
+    let catalog = ManifestCatalog::load_from_paths(&manifest_paths);
 
-    let catalog = ManifestCatalog::load_from_paths(&args.manifests);
-
-    let answers_arg = args.answers.clone();
-    let answers_file_arg = args.answers_file.clone();
+    let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
+    let has_answer_inputs = args.answers.is_some() || args.answers_file.is_some();
+    let mut component_label = args
+        .component_ref
+        .clone()
+        .or_else(|| {
+            args.local_wasm
+                .as_ref()
+                .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "component".to_string());
 
     let (mode_input, require_placeholder_flag) = match args.mode {
         AddStepMode::Default => {
+            let mut payload_json: serde_json::Value =
+                serde_json::from_str(&args.payload).context("parse --payload as JSON")?;
+            let mut used_writes = false;
+            let manifest_path = if let Some(path) = args.manifests.first() {
+                Some(path.clone())
+            } else {
+                resolve_component_manifest_path(&component_source, &args.flow_path).ok()
+            };
+            if let Some(path) = manifest_path {
+                let manifest = load_manifest_json(&path)?;
+                if let Some(name) = component_name_from_manifest(&manifest) {
+                    component_label = name;
+                }
+                let questions = questions_from_manifest(&path, "default")?;
+                if !questions.is_empty() {
+                    warn_unknown_keys(&answers, &questions);
+                    println!("{}", wizard_header(&component_label, "default"));
+                    if has_answer_inputs {
+                        validate_required(&questions, &answers)?;
+                    } else {
+                        answers = run_interactive_with_seed(&questions, answers)?;
+                    }
+                    if questions.iter().any(|q| q.writes_to.is_some()) {
+                        payload_json = apply_writes_to(payload_json, &questions, &answers)?;
+                        used_writes = true;
+                    }
+                }
+            }
             let operation = args.operation.clone().ok_or_else(|| {
                 anyhow::anyhow!(
                     "--operation is required in default mode (component id is not stored in flows)"
                 )
             })?;
-            let payload_json: serde_json::Value =
-                serde_json::from_str(&args.payload).context("parse --payload as JSON")?;
+            if !used_writes {
+                payload_json = merge_payload(payload_json, answers_to_value(&answers));
+            }
             let routing_json = routing_value.clone();
             (
                 AddStepModeInput::Default {
@@ -998,29 +1156,29 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
         }
         AddStepMode::Config => {
             let (config_flow, schema_path) =
-                resolve_config_flow(args.config_flow.clone(), &args.manifests)?;
-            let mut answers = serde_json::Map::new();
-            if let Some(a) = answers_arg {
-                let parsed: serde_json::Value =
-                    serde_json::from_str(&a).context("parse --answers JSON")?;
-                if let Some(obj) = parsed.as_object() {
-                    answers.extend(obj.clone());
-                }
+                resolve_config_flow(args.config_flow.clone(), &manifest_paths, "custom")?;
+            if let Some(path) = manifest_paths.first().cloned()
+                && let Ok(manifest) = load_manifest_json(&path)
+                && let Some(name) = component_name_from_manifest(&manifest)
+            {
+                component_label = name;
             }
-            if let Some(file) = answers_file_arg {
-                let text = fs::read_to_string(&file)
-                    .with_context(|| format!("read {}", file.display()))?;
-                let parsed: serde_json::Value =
-                    serde_json::from_str(&text).context("parse answers file as JSON")?;
-                if let Some(obj) = parsed.as_object() {
-                    answers.extend(obj.clone());
+            let questions = questions_from_config_flow_text(&config_flow)?;
+            if !questions.is_empty() {
+                warn_unknown_keys(&answers, &questions);
+                println!("{}", wizard_header(&component_label, "config"));
+                if has_answer_inputs {
+                    validate_required(&questions, &answers)?;
+                } else {
+                    answers = run_interactive_with_seed(&questions, answers)?;
                 }
             }
             (
                 AddStepModeInput::Config {
                     config_flow,
                     schema_path: schema_path.into_boxed_path(),
-                    answers,
+                    answers: answers_to_json_map(answers),
+                    manifest_id: Some(component_label.clone()),
                 },
                 true,
             )
@@ -1109,21 +1267,87 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
         .get(&args.step)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("step '{}' not found", args.step))?;
-
-    let answers = parse_answers_inputs(args.answers.as_deref(), args.answers_file.as_deref())?;
     let mut merged_payload = node.payload.clone();
     if let Some(component_defaults) = component_payload {
         merged_payload = merge_payload(merged_payload, Some(component_defaults));
     }
-    let new_payload = if args.mode == "config" || args.mode == "default" {
-        merge_payload(merged_payload, answers)
-    } else {
-        merged_payload
-    };
-    let new_operation = args
+    let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
+    let mut component_label = "component".to_string();
+    let mut new_operation = args
         .operation
         .clone()
         .unwrap_or_else(|| node.operation.clone());
+    let new_payload = if args.mode == "config" {
+        let manifest_path =
+            resolve_component_manifest_path(&sidecar_entry.source, &args.flow_path)?;
+        let manifest = load_manifest_json(&manifest_path)?;
+        if let Some(name) = component_name_from_manifest(&manifest) {
+            component_label = name;
+        }
+        let (config_flow, schema_path) = resolve_config_flow(None, &[manifest_path], "custom")?;
+        let mut base_answers = QuestionAnswers::new();
+        if let Some(obj) = merged_payload.as_object() {
+            base_answers.extend(obj.clone());
+        }
+        base_answers.extend(answers.clone());
+        let questions = questions_from_config_flow_text(&config_flow)?;
+        if !questions.is_empty() {
+            warn_unknown_keys(&answers, &questions);
+            println!("{}", wizard_header(&component_label, "config"));
+            if args.non_interactive {
+                validate_required(&questions, &base_answers)?;
+            } else {
+                base_answers = run_interactive_with_seed(&questions, base_answers)?;
+            }
+        }
+        let answers_map = answers_to_json_map(base_answers);
+        let output = run_config_flow(
+            &config_flow,
+            &schema_path,
+            &answers_map,
+            Some(component_label.clone()),
+        )?;
+        let normalized = normalize_node_map(output.node)?;
+        if args.operation.is_none() {
+            new_operation = normalized.operation.clone();
+        }
+        normalized.payload
+    } else if args.mode == "default" {
+        let mut payload = merged_payload;
+        let mut used_writes = false;
+        if let Ok(manifest_path) =
+            resolve_component_manifest_path(&sidecar_entry.source, &args.flow_path)
+        {
+            let manifest = load_manifest_json(&manifest_path)?;
+            if let Some(name) = component_name_from_manifest(&manifest) {
+                component_label = name;
+            }
+            let questions = questions_from_manifest(&manifest_path, "default")?;
+            if !questions.is_empty() {
+                let mut base_answers = extract_answers_from_payload(&questions, &payload);
+                warn_unknown_keys(&answers, &questions);
+                base_answers.extend(answers.clone());
+                println!("{}", wizard_header(&component_label, "default"));
+                if args.non_interactive {
+                    validate_required(&questions, &base_answers)?;
+                } else {
+                    base_answers = run_interactive_with_seed(&questions, base_answers)?;
+                }
+                answers = base_answers;
+                if questions.iter().any(|q| q.writes_to.is_some()) {
+                    payload = apply_writes_to(payload, &questions, &answers)?;
+                    used_writes = true;
+                }
+            }
+        }
+        if used_writes {
+            payload
+        } else {
+            merge_payload(payload, answers_to_value(&answers))
+        }
+    } else {
+        merged_payload
+    };
     let new_routing = if let Some(routing) = build_update_routing(&args)? {
         routing
     } else {
@@ -1292,30 +1516,30 @@ fn handle_bind_component(args: BindComponentArgs) -> Result<()> {
     Ok(())
 }
 
-fn parse_answers_inputs(
+fn parse_answers_map(
     answers: Option<&str>,
     answers_file: Option<&Path>,
-) -> Result<Option<serde_json::Value>> {
-    let mut merged: Option<serde_json::Value> = None;
-    if let Some(text) = answers {
-        let parsed: serde_json::Value = serde_yaml_bw::from_str(text)
-            .or_else(|_| serde_json::from_str(text))
-            .context("parse --answers as JSON/YAML")?;
-        merged = Some(merge_payload(
-            merged.unwrap_or(serde_json::Value::Null),
-            Some(parsed),
-        ));
-    }
+) -> Result<QuestionAnswers> {
+    let mut merged = QuestionAnswers::new();
     if let Some(path) = answers_file {
         let text = fs::read_to_string(path)
             .with_context(|| format!("read answers file {}", path.display()))?;
         let parsed: serde_json::Value = serde_yaml_bw::from_str(&text)
             .or_else(|_| serde_json::from_str(&text))
             .context("parse answers file as JSON/YAML")?;
-        merged = Some(merge_payload(
-            merged.unwrap_or(serde_json::Value::Null),
-            Some(parsed),
-        ));
+        let obj = parsed
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("answers file must contain a JSON/YAML object"))?;
+        merged.extend(obj.clone());
+    }
+    if let Some(text) = answers {
+        let parsed: serde_json::Value = serde_yaml_bw::from_str(text)
+            .or_else(|_| serde_json::from_str(text))
+            .context("parse --answers as JSON/YAML")?;
+        let obj = parsed
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("--answers must be a JSON/YAML object"))?;
+        merged.extend(obj.clone());
     }
     Ok(merged)
 }
@@ -1708,6 +1932,82 @@ fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Pa
         }
     }
     Ok(())
+}
+
+fn resolve_component_manifest_path(
+    source: &ComponentSourceRefV1,
+    flow_path: &Path,
+) -> Result<PathBuf> {
+    let manifest_path = match source {
+        ComponentSourceRefV1::Local { path, .. } => local_path_from_sidecar(path, flow_path)
+            .parent()
+            .map(|p| p.join("component.manifest.json"))
+            .unwrap_or_else(|| {
+                flow_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join("component.manifest.json")
+            }),
+        ComponentSourceRefV1::Oci { r#ref, digest } => {
+            let client = DistClient::new(Default::default());
+            let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+            let cached = if let Some(d) = digest {
+                rt.block_on(client.fetch_digest(d))
+            } else {
+                rt.block_on(client.ensure_cached(r#ref))
+                    .map(|r| r.cache_path.unwrap_or_default())
+            };
+            let mut candidate = cached
+                .ok()
+                .and_then(|artifact| artifact.parent().map(|p| p.join("component.manifest.json")))
+                .unwrap_or_else(|| PathBuf::from("component.manifest.json"));
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+            let resolved_ref = if let Some(d) = digest {
+                if r#ref.contains('@') {
+                    r#ref.to_string()
+                } else {
+                    format!("{}@{}", r#ref, d)
+                }
+            } else {
+                r#ref.to_string()
+            };
+            let resolved = rt
+                .block_on(client.resolve_ref(&resolved_ref))
+                .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", resolved_ref))?;
+            if let Some(path) = resolved.cache_path
+                && let Some(parent) = path.parent()
+            {
+                candidate = parent.join("component.manifest.json");
+            }
+            candidate
+        }
+        ComponentSourceRefV1::Repo { r#ref, digest }
+        | ComponentSourceRefV1::Store { r#ref, digest, .. } => {
+            let client = DistClient::new(Default::default());
+            let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+            let artifact = if let Some(d) = digest {
+                rt.block_on(client.fetch_digest(d))
+            } else {
+                rt.block_on(client.ensure_cached(r#ref))
+                    .map(|r| r.cache_path.unwrap_or_default())
+            }
+            .map_err(|e| anyhow::anyhow!("resolve component {}: {e}", r#ref))?;
+            artifact
+                .parent()
+                .map(|p| p.join("component.manifest.json"))
+                .unwrap_or_else(|| PathBuf::from("component.manifest.json"))
+        }
+    };
+
+    if !manifest_path.exists() {
+        anyhow::bail!(
+            "component.manifest.json not found at {}",
+            manifest_path.display()
+        );
+    }
+    Ok(manifest_path)
 }
 
 fn load_component_payload(

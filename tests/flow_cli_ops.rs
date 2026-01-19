@@ -1,7 +1,9 @@
-use assert_cmd::Command as AssertCommand;
+use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::prelude::*;
 use greentic_flow::loader::load_ygtc_from_path;
+use predicates::prelude::PredicateBooleanExt;
 use serde_json::Value as JsonValue;
+use serde_json::json;
 use serde_yaml_bw::Value;
 use std::{fs, path::Path, process::Command};
 use tempfile::tempdir;
@@ -15,7 +17,7 @@ fn new_writes_v2_empty_flow() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .arg("new")
         .arg("--flow")
         .arg(&flow_path)
@@ -53,7 +55,7 @@ fn add_step_into_empty_flow_succeeds() {
     let wasm_path = dir.path().join("comp.wasm");
     fs::write(&wasm_path, b"wasm-bytes").unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
@@ -105,7 +107,7 @@ nodes:
     )
     .unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
@@ -150,7 +152,7 @@ nodes:
     )
     .unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
@@ -189,7 +191,7 @@ nodes:
     let wasm_path = dir.path().join("comp.wasm");
     fs::write(&wasm_path, b"wasm-bytes").unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
@@ -305,7 +307,7 @@ nodes:
     let wasm_path = component_dir.join("component_hello_world.wasm");
     fs::write(&wasm_path, b"wasm-bytes").unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
@@ -364,7 +366,7 @@ nodes:
     let wasm_path = component_dir.join("component_hello_world.wasm");
     fs::write(&wasm_path, b"wasm-bytes").unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
@@ -417,7 +419,7 @@ nodes:
     )
     .unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .current_dir(dir.path())
         .arg("add-step")
         .arg("--flow")
@@ -455,6 +457,275 @@ nodes:
             .and_then(JsonValue::as_str)
             .unwrap(),
         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
+}
+
+#[test]
+fn add_step_default_prompts_for_questions() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    let template = json!({
+        "node_id": "card1",
+        "node": {
+            "card": { "msg": "{{state.msg}}" },
+            "routing": [ { "to": "NEXT_NODE_PLACEHOLDER" } ]
+        }
+    });
+    let manifest = json!({
+        "id": "ai.greentic.card",
+        "dev_flows": {
+            "default": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "start": "ask",
+                    "nodes": {
+                        "ask": {
+                            "questions": {
+                                "fields": [
+                                    {
+                                        "id": "msg",
+                                        "prompt": "Message?",
+                                        "type": "string",
+                                        "default": "hi",
+                                        "writes_to": "msg"
+                                    }
+                                ]
+                            },
+                            "routing": [ { "to": "emit" } ]
+                        },
+                        "emit": {
+                            "template": serde_json::to_string(&template).unwrap()
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let manifest_path = dir.path().join("component.manifest.json");
+    fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("card1")
+        .arg("--operation")
+        .arg("card")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .arg("--manifest")
+        .arg(&manifest_path)
+        .write_stdin("hello\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Question (msg):"));
+
+    let yaml = read_yaml(&flow_path);
+    let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
+    let inserted = nodes
+        .get(Value::from("card1"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    let card = inserted
+        .get(Value::from("card"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    assert_eq!(
+        card.get(Value::from("msg")).unwrap().as_str(),
+        Some("hello")
+    );
+}
+
+#[test]
+fn add_step_default_skips_prompt_without_dev_flow() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("card1")
+        .arg("--operation")
+        .arg("card")
+        .arg("--payload")
+        .arg(r#"{"msg":"hi"}"#)
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Question (").not());
+}
+
+#[test]
+fn add_step_config_uses_cached_component_manifest() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let cache_dir = dir.path().join("cache");
+    let digest_dir =
+        cache_dir.join("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    fs::create_dir_all(&digest_dir).unwrap();
+    fs::write(digest_dir.join("component.wasm"), b"wasm-bytes").unwrap();
+
+    let template = json!({
+        "node_id": "adaptive-card",
+        "node": {
+            "component.exec": {
+                "component": "ai.greentic.card",
+                "input": { "text": "hi" }
+            },
+            "operation": "handle_message",
+            "routing": [ { "to": "NEXT_NODE_PLACEHOLDER" } ]
+        }
+    });
+    let manifest = json!({
+        "id": "ai.greentic.card",
+        "dev_flows": {
+            "default": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "start": "in",
+                    "nodes": {
+                        "in": {
+                            "questions": { "fields": [] },
+                            "routing": [ { "to": "emit" } ]
+                        },
+                        "emit": {
+                            "template": serde_json::to_string(&template).unwrap()
+                        }
+                    }
+                }
+            },
+            "custom": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "start": "in",
+                    "nodes": {
+                        "in": {
+                            "questions": { "fields": [] },
+                            "routing": [ { "to": "emit" } ]
+                        },
+                        "emit": {
+                            "template": serde_json::to_string(&template).unwrap()
+                        }
+                    }
+                }
+            }
+        }
+    });
+    fs::write(
+        digest_dir.join("component.manifest.json"),
+        manifest.to_string(),
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("config")
+        .arg("--node-id")
+        .arg("adaptive-card")
+        .arg("--component")
+        .arg("oci://example.com/component:latest")
+        .arg("--pin")
+        .arg("--after")
+        .arg("start")
+        .arg("--write")
+        .env("GREENTIC_FLOW_TEST_DIGEST", digest)
+        .env("GREENTIC_DIST_CACHE_DIR", &cache_dir)
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&flow_path);
+    let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
+    let start = nodes
+        .get(Value::from("start"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    let routing = start
+        .get(Value::from("routing"))
+        .unwrap()
+        .as_sequence()
+        .unwrap();
+    let to = routing[0]
+        .as_mapping()
+        .unwrap()
+        .get(Value::from("to"))
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert_eq!(to, "adaptive-card");
+
+    let inserted = nodes
+        .get(Value::from("adaptive-card"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    assert_eq!(
+        inserted.get(Value::from("routing")).and_then(Value::as_str),
+        Some("out")
     );
 }
 
@@ -864,7 +1135,7 @@ nodes:
     )
     .unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .arg("update-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -906,6 +1177,55 @@ fn update_step_preserves_when_no_answers() {
     let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
     let wasm_path = dir.path().join("comp.wasm");
     fs::write(&wasm_path, b"wasm-bytes").unwrap();
+    let template = json!({
+        "node_id": "hello",
+        "node": {
+            "op": { "field": "{{state.field}}" },
+            "routing": [ { "to": "NEXT_NODE_PLACEHOLDER" } ]
+        }
+    });
+    let manifest = json!({
+        "id": "ai.greentic.test",
+        "dev_flows": {
+            "default": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "start": "in",
+                    "nodes": {
+                        "in": {
+                            "questions": { "fields": [ { "id": "field", "default": "old" } ] },
+                            "routing": [ { "to": "emit" } ]
+                        },
+                        "emit": {
+                            "template": serde_json::to_string(&template).unwrap()
+                        }
+                    }
+                }
+            },
+            "custom": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "start": "in",
+                    "nodes": {
+                        "in": {
+                            "questions": { "fields": [ { "id": "field", "default": "old" } ] },
+                            "routing": [ { "to": "emit" } ]
+                        },
+                        "emit": {
+                            "template": serde_json::to_string(&template).unwrap()
+                        }
+                    }
+                }
+            }
+        }
+    });
+    fs::write(
+        dir.path().join("component.manifest.json"),
+        manifest.to_string(),
+    )
+    .unwrap();
     fs::write(
         &sidecar_path,
         r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
@@ -925,7 +1245,7 @@ nodes:
     )
     .unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .arg("update-step")
         .arg("--flow")
         .arg(&flow_path)
@@ -954,6 +1274,277 @@ nodes:
         hello.get(Value::from("routing")).unwrap().as_str(),
         Some("out")
     );
+}
+
+#[test]
+fn update_step_config_prompts_for_questions() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    let template = json!({
+        "node_id": "hello",
+        "node": {
+            "card": { "msg": "{{state.msg}}" },
+            "routing": [ { "to": "NEXT_NODE_PLACEHOLDER" } ]
+        }
+    });
+    let manifest = json!({
+        "id": "ai.greentic.card",
+        "dev_flows": {
+            "custom": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "start": "ask",
+                    "nodes": {
+                        "ask": {
+                            "questions": {
+                                "fields": [
+                                    {
+                                        "id": "msg",
+                                        "prompt": "Message?",
+                                        "type": "string"
+                                    }
+                                ]
+                            },
+                            "routing": [ { "to": "emit" } ]
+                        },
+                        "emit": {
+                            "template": serde_json::to_string(&template).unwrap()
+                        }
+                    }
+                }
+            }
+        }
+    });
+    fs::write(
+        dir.path().join("component.manifest.json"),
+        manifest.to_string(),
+    )
+    .unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    card: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("update-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--step")
+        .arg("hello")
+        .arg("--mode")
+        .arg("config")
+        .write_stdin("new\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Question (msg):"));
+
+    let yaml = read_yaml(&flow_path);
+    let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
+    let hello = nodes
+        .get(Value::from("hello"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    let card = hello
+        .get(Value::from("card"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    assert_eq!(card.get(Value::from("msg")).unwrap().as_str(), Some("new"));
+}
+
+#[test]
+fn add_step_config_requires_custom_dev_flow() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    let manifest = json!({
+        "id": "ai.greentic.card",
+        "dev_flows": {
+            "default": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "nodes": {}
+                }
+            }
+        }
+    });
+    let manifest_path = dir.path().join("component.manifest.json");
+    fs::write(&manifest_path, manifest.to_string()).unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("config")
+        .arg("--node-id")
+        .arg("card1")
+        .arg("--operation")
+        .arg("card")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .arg("--manifest")
+        .arg(&manifest_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("dev_flows.custom"));
+}
+
+#[test]
+fn add_step_default_fixture_prompts_and_applies_answers() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let fixture_flow =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/flows/simple.ygtc");
+    fs::write(&flow_path, fs::read_to_string(&fixture_flow).unwrap()).unwrap();
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/manifests/component.manifest.json");
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--node-id")
+        .arg("card1")
+        .arg("--mode")
+        .arg("default")
+        .arg("--operation")
+        .arg("card")
+        .arg("--payload")
+        .arg(r#"{}"#)
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .arg("--manifest")
+        .arg(&manifest_path)
+        .write_stdin("assets/cards/card.json\ny\n")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Question (asset_path):"))
+        .stdout(predicates::str::contains("Question (needs_interaction):"));
+
+    let yaml = read_yaml(&flow_path);
+    let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
+    let inserted = nodes
+        .get(Value::from("card1"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    let card = inserted
+        .get(Value::from("card"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    let card_spec = card
+        .get(Value::from("card_spec"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    assert_eq!(
+        card_spec.get(Value::from("asset_path")).unwrap().as_str(),
+        Some("assets/cards/card.json")
+    );
+    let interaction = card
+        .get(Value::from("interaction"))
+        .unwrap()
+        .as_mapping()
+        .unwrap();
+    assert_eq!(
+        interaction
+            .get(Value::from("enabled"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+}
+
+#[test]
+fn update_step_non_interactive_missing_required_reports_template() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    let manifest_fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/manifests/component.manifest.json");
+    fs::write(
+        dir.path().join("component.manifest.json"),
+        fs::read_to_string(&manifest_fixture).unwrap(),
+    )
+    .unwrap();
+
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"card1":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  card1:
+    card: {}
+    routing: out
+"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("update-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--step")
+        .arg("card1")
+        .arg("--mode")
+        .arg("default")
+        .arg("--non-interactive")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing required answers"))
+        .stderr(predicates::str::contains("--answers"))
+        .stderr(predicates::str::contains("asset_path"));
 }
 
 #[test]
@@ -1135,7 +1726,7 @@ nodes:
     )
     .unwrap();
 
-    AssertCommand::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .arg("doctor")
         .arg(&flow_path)
         .write_stdin("y\n")
@@ -1178,7 +1769,7 @@ nodes:
     )
     .unwrap();
 
-    AssertCommand::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+    cargo_bin_cmd!("greentic-flow")
         .arg("doctor")
         .arg(&flow_path)
         .write_stdin("n\n")

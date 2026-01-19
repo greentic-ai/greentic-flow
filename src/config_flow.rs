@@ -1,13 +1,12 @@
 use std::path::Path;
 
-use lazy_static::lazy_static;
-use regex::Regex;
 use serde_json::{Map, Value};
 
 use crate::{
     compile_flow,
     error::{FlowError, FlowErrorLocation, Result},
     loader::load_ygtc_from_str_with_schema,
+    template::TemplateRenderer,
 };
 
 /// Result of executing a config flow: a node identifier and the node object to insert.
@@ -21,7 +20,8 @@ pub struct ConfigFlowOutput {
 ///
 /// Supported components:
 /// - `questions`: seeds state values from provided answers or defaults.
-/// - `template`: renders the template payload, replacing `{{state.key}}` placeholders inside strings.
+/// - `template`: renders the template payload with simple Handlebars helpers and `{{state.key}}`
+///   interpolation.
 ///
 /// The flow ends when a `template` node is executed. Routing follows the first non-out route if
 /// present, otherwise stops.
@@ -29,11 +29,13 @@ pub fn run_config_flow(
     yaml: &str,
     schema_path: &Path,
     answers: &Map<String, Value>,
+    manifest_id: Option<String>,
 ) -> Result<ConfigFlowOutput> {
     let normalized_yaml = normalize_config_flow_yaml(yaml)?;
     let doc = load_ygtc_from_str_with_schema(&normalized_yaml, schema_path)?;
     let flow = compile_flow(doc.clone())?;
     let mut state = answers.clone();
+    let renderer = TemplateRenderer::new(manifest_id);
 
     let mut current = resolve_entry(&doc);
     let mut visited = 0usize;
@@ -60,7 +62,7 @@ pub fn run_config_flow(
                 apply_questions(&node.input.mapping, &mut state)?;
             }
             "template" => {
-                let payload = render_template(&node.input.mapping, &state)?;
+                let payload = render_template(&node.input.mapping, &state, &renderer, &current)?;
                 return extract_config_output(payload);
             }
             other => {
@@ -99,13 +101,14 @@ pub fn run_config_flow_from_path(
     path: &Path,
     schema_path: &Path,
     answers: &Map<String, Value>,
+    manifest_id: Option<String>,
 ) -> Result<ConfigFlowOutput> {
     let text = std::fs::read_to_string(path).map_err(|e| FlowError::Internal {
         message: format!("read config flow {}: {e}", path.display()),
         location: FlowErrorLocation::at_path(path.display().to_string())
             .with_source_path(Some(path)),
     })?;
-    run_config_flow(&text, schema_path, answers)
+    run_config_flow(&text, schema_path, answers, manifest_id)
 }
 
 fn resolve_entry(doc: &crate::model::FlowDoc) -> String {
@@ -154,50 +157,17 @@ fn apply_questions(payload: &Value, state: &mut Map<String, Value>) -> Result<()
     Ok(())
 }
 
-fn render_template(payload: &Value, state: &Map<String, Value>) -> Result<Value> {
+fn render_template(
+    payload: &Value,
+    state: &Map<String, Value>,
+    renderer: &TemplateRenderer,
+    node_id: &str,
+) -> Result<Value> {
     let template_str = payload.as_str().ok_or_else(|| FlowError::Internal {
         message: "template node payload must be a string".to_string(),
         location: FlowErrorLocation::at_path("template".to_string()),
     })?;
-    let mut value: Value = serde_json::from_str(template_str).map_err(|e| FlowError::Internal {
-        message: format!("template JSON parse error: {e}"),
-        location: FlowErrorLocation::at_path("template".to_string()),
-    })?;
-    substitute_state(&mut value, state)?;
-    Ok(value)
-}
-
-lazy_static! {
-    static ref STATE_RE: Regex = Regex::new(r"^\{\{\s*state\.([A-Za-z_]\w*)\s*\}\}$").unwrap();
-}
-
-fn substitute_state(target: &mut Value, state: &Map<String, Value>) -> Result<()> {
-    match target {
-        Value::String(s) => {
-            if let Some(caps) = STATE_RE.captures(s) {
-                let key = caps.get(1).unwrap().as_str();
-                let val = state.get(key).ok_or_else(|| FlowError::Internal {
-                    message: format!("state value for '{key}' not found"),
-                    location: FlowErrorLocation::at_path(format!("state.{key}")),
-                })?;
-                *target = val.clone();
-            }
-            Ok(())
-        }
-        Value::Array(items) => {
-            for item in items {
-                substitute_state(item, state)?;
-            }
-            Ok(())
-        }
-        Value::Object(map) => {
-            for value in map.values_mut() {
-                substitute_state(value, state)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
+    renderer.render_json(template_str, state, node_id)
 }
 
 fn extract_config_output(value: Value) -> Result<ConfigFlowOutput> {

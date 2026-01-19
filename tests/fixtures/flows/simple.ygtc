@@ -1,0 +1,7 @@
+id: main
+type: messaging
+schema_version: 2
+nodes:
+  start:
+    op: {}
+    routing: out

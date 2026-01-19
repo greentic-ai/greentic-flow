@@ -1,0 +1,33 @@
+{
+  "id": "ai.greentic.card",
+  "dev_flows": {
+    "default": {
+      "graph": {
+        "id": "cfg",
+        "type": "component-config",
+        "start": "ask",
+        "nodes": {
+          "ask": {
+            "questions": {
+              "fields": [
+                {
+                  "id": "asset_path",
+                  "prompt": "Asset path",
+                  "type": "string",
+                  "writes_to": "card_spec.asset_path"
+                },
+                {
+                  "id": "needs_interaction",
+                  "prompt": "Needs interaction?",
+                  "type": "bool",
+                  "default": false,
+                  "writes_to": "interaction.enabled"
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}
