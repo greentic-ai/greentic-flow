@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{
     collections::BTreeSet,
+    env,
     ffi::OsStr,
     fs,
     io::{self, Read, Write},
@@ -33,6 +34,7 @@ use greentic_flow::{
         Answers as QuestionAnswers, Question, apply_writes_to, extract_answers_from_payload,
         extract_questions_from_flow, run_interactive_with_seed, validate_required,
     },
+    questions_schema::{example_for_questions, schema_for_questions},
     registry::AdapterCatalog,
     resolve_summary::{remove_flow_resolve_summary_node, write_flow_resolve_summary_for_node},
 };
@@ -41,6 +43,7 @@ use greentic_types::flow_resolve::{
     read_flow_resolve, sidecar_path_for_flow, write_flow_resolve,
 };
 use indexmap::IndexMap;
+use jsonschema::Draft;
 use pathdiff::diff_paths;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -65,6 +68,10 @@ enum Commands {
     DeleteStep(DeleteStepArgs),
     /// Validate flows.
     Doctor(DoctorArgs),
+    /// Validate answers JSON against a schema.
+    DoctorAnswers(DoctorAnswersArgs),
+    /// Emit JSON schema + example answers for a component operation.
+    Answers(AnswersArgs),
     /// Attach or repair a sidecar component binding without changing flow nodes.
     BindComponent(BindComponentArgs),
 }
@@ -136,6 +143,38 @@ struct DoctorArgs {
     /// Flow files or directories to lint.
     #[arg(required_unless_present = "stdin")]
     targets: Vec<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct DoctorAnswersArgs {
+    /// Path to the answers JSON schema.
+    #[arg(long = "schema")]
+    schema: PathBuf,
+    /// Path to the answers JSON.
+    #[arg(long = "answers")]
+    answers: PathBuf,
+    /// Emit JSON output.
+    #[arg(long = "json")]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct AnswersArgs {
+    /// Component reference (oci://, repo://, store://) or local path.
+    #[arg(long = "component")]
+    component: String,
+    /// Component operation (used to select dev_flow graph).
+    #[arg(long = "operation")]
+    operation: String,
+    /// Which dev_flow to use for questions (default uses --operation, config uses "custom").
+    #[arg(long = "mode", value_enum, default_value = "default")]
+    mode: AnswersMode,
+    /// Output file prefix.
+    #[arg(long = "name")]
+    name: String,
+    /// Output directory (defaults to current directory).
+    #[arg(long = "out-dir")]
+    out_dir: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -213,6 +252,12 @@ struct DeleteStepArgs {
     write: bool,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum AnswersMode {
+    Default,
+    Config,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -222,6 +267,8 @@ fn main() -> Result<()> {
         Commands::UpdateStep(args) => handle_update_step(args),
         Commands::DeleteStep(args) => handle_delete_step(args),
         Commands::Doctor(args) => handle_doctor(args),
+        Commands::DoctorAnswers(args) => handle_doctor_answers(args),
+        Commands::Answers(args) => handle_answers(args),
         Commands::BindComponent(args) => handle_bind_component(args),
     }
 }
@@ -312,6 +359,80 @@ fn handle_new(args: NewArgs) -> Result<()> {
         args.flow_id,
         args.flow_path.display(),
         args.flow_type
+    );
+    Ok(())
+}
+
+fn handle_doctor_answers(args: DoctorAnswersArgs) -> Result<()> {
+    let schema_text = fs::read_to_string(&args.schema)
+        .with_context(|| format!("read schema {}", args.schema.display()))?;
+    let answers_text = fs::read_to_string(&args.answers)
+        .with_context(|| format!("read answers {}", args.answers.display()))?;
+    let schema: serde_json::Value =
+        serde_json::from_str(&schema_text).context("parse schema as JSON")?;
+    let answers: serde_json::Value =
+        serde_json::from_str(&answers_text).context("parse answers as JSON")?;
+
+    let compiled = jsonschema::options()
+        .with_draft(Draft::Draft202012)
+        .build(&schema)
+        .context("compile answers schema")?;
+    if let Err(error) = compiled.validate(&answers) {
+        let messages = vec![error.to_string()];
+        if args.json {
+            let payload = json!({ "ok": false, "errors": messages });
+            print_json_payload(&payload)?;
+            std::process::exit(1);
+        } else {
+            for msg in &messages {
+                eprintln!("error: {msg}");
+            }
+        }
+        anyhow::bail!("answers failed schema validation");
+    }
+
+    if args.json {
+        let payload = json!({ "ok": true, "errors": [] });
+        print_json_payload(&payload)?;
+    }
+    Ok(())
+}
+
+fn handle_answers(args: AnswersArgs) -> Result<()> {
+    let manifest_path = resolve_manifest_path_for_component(&args.component)?;
+    let manifest = load_manifest_json(&manifest_path)?;
+    let requested_flow = match args.mode {
+        AnswersMode::Default => args.operation.as_str(),
+        AnswersMode::Config => "custom",
+    };
+    let (questions, used_flow) = questions_for_operation(&manifest, requested_flow)?;
+    if used_flow.as_deref() != Some(requested_flow)
+        && let Some(flow) = used_flow
+    {
+        eprintln!(
+            "warning: dev_flows.{} not found; using dev_flows.{} for questions",
+            requested_flow, flow
+        );
+    }
+
+    let schema = schema_for_questions(&questions);
+    let example = example_for_questions(&questions);
+    validate_example_against_schema(&schema, &example)?;
+
+    let out_dir = match args.out_dir {
+        Some(dir) => dir,
+        None => env::current_dir().context("resolve current directory")?,
+    };
+    fs::create_dir_all(&out_dir)
+        .with_context(|| format!("create output dir {}", out_dir.display()))?;
+    let schema_path = out_dir.join(format!("{}.schema.json", args.name));
+    let example_path = out_dir.join(format!("{}.example.json", args.name));
+    write_json_file(&schema_path, &schema)?;
+    write_json_file(&example_path, &example)?;
+    println!(
+        "Wrote answers schema to {} and example to {}",
+        schema_path.display(),
+        example_path.display()
     );
     Ok(())
 }
@@ -790,11 +911,60 @@ fn load_manifest_json(path: &Path) -> Result<serde_json::Value> {
     serde_json::from_str(&text).context("parse manifest JSON")
 }
 
+fn resolve_manifest_path_for_component(component: &str) -> Result<PathBuf> {
+    if component.starts_with("oci://")
+        || component.starts_with("repo://")
+        || component.starts_with("store://")
+    {
+        validate_component_ref(component)?;
+        let source = classify_remote_source(component, None);
+        return resolve_component_manifest_path(&source, Path::new("."));
+    }
+
+    let raw = component.strip_prefix("file://").unwrap_or(component);
+    let path = PathBuf::from(raw);
+    if !path.exists() {
+        anyhow::bail!("component path {} not found", path.display());
+    }
+    if path.is_dir() {
+        let manifest_path = path.join("component.manifest.json");
+        if !manifest_path.exists() {
+            anyhow::bail!(
+                "component.manifest.json not found at {}",
+                manifest_path.display()
+            );
+        }
+        return Ok(manifest_path);
+    }
+    if path.is_file() {
+        return Ok(path);
+    }
+    anyhow::bail!(
+        "component path {} is not a file or directory",
+        path.display()
+    )
+}
+
 fn component_name_from_manifest(manifest: &serde_json::Value) -> Option<String> {
     manifest
         .get("id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn questions_for_operation(
+    manifest: &serde_json::Value,
+    operation: &str,
+) -> Result<(Vec<Question>, Option<String>)> {
+    if let Some(graph) = dev_flow_graph_from_manifest(manifest, operation)? {
+        let questions = extract_questions_from_flow(&graph)?;
+        return Ok((questions, Some(operation.to_string())));
+    }
+    if let Some(graph) = dev_flow_graph_from_manifest(manifest, "default")? {
+        let questions = extract_questions_from_flow(&graph)?;
+        return Ok((questions, Some("default".to_string())));
+    }
+    Ok((Vec::new(), None))
 }
 
 fn dev_flow_graph_from_manifest(
@@ -824,6 +994,34 @@ fn questions_from_config_flow_text(text: &str) -> Result<Vec<Question>> {
     let flow_value: serde_json::Value =
         serde_yaml_bw::from_str(text).context("parse config flow as YAML")?;
     extract_questions_from_flow(&flow_value)
+}
+
+fn validate_example_against_schema(
+    schema: &serde_json::Value,
+    example: &serde_json::Value,
+) -> Result<()> {
+    let compiled = jsonschema::options()
+        .with_draft(Draft::Draft202012)
+        .build(schema)
+        .context("compile answers schema")?;
+    if let Err(error) = compiled.validate(example) {
+        let messages = error.to_string();
+        anyhow::bail!("generated example does not validate against schema: {messages}");
+    }
+    Ok(())
+}
+
+fn write_json_file(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let mut text = serde_json::to_string_pretty(value).context("serialize json")?;
+    text.push('\n');
+    fs::write(path, text).with_context(|| format!("write {}", path.display()))
+}
+
+fn print_json_payload(value: &serde_json::Value) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    serde_json::to_writer_pretty(&mut stdout, value).context("write json")?;
+    writeln!(stdout).context("write newline")?;
+    Ok(())
 }
 
 fn answers_to_json_map(answers: QuestionAnswers) -> serde_json::Map<String, serde_json::Value> {

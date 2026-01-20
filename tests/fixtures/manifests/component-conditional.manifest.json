@@ -21,6 +21,7 @@
                   "id": "asset_path",
                   "prompt": "Asset path",
                   "type": "string",
+                  "required": true,
                   "default": "cards/card.json",
                   "show_if": { "id": "card_source", "equals": "asset" }
                 },

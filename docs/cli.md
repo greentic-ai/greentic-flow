@@ -150,6 +150,28 @@ greentic-flow doctor --json --stdin < flows/main.ygtc
 Defaults to the embedded `schemas/ygtc.flow.schema.json`. `--json` emits a machine-readable report for one flow; `--registry` enables adapter_resolvable linting.
 Also updates the flow’s `*.ygtc.resolve.json` to drop stale node bindings and keep the flow name in sync.
 
+### answers
+Emit JSON Schema + example answers for a component operation without prompting.
+
+```
+greentic-flow answers --component <oci|path> --operation <op> --name <prefix> [--out-dir <dir>] [--mode default|config]
+```
+
+- Reads `component.manifest.json` from the component path or cached remote artifact.
+- Selects `dev_flows.<operation>.graph` for questions; `--mode config` uses `dev_flows.custom`.
+- Falls back to `dev_flows.default` if the requested flow is missing.
+- Writes `<prefix>.schema.json` and `<prefix>.example.json`; example validates against schema.
+
+### doctor-answers
+Validate answers JSON against a schema.
+
+```
+greentic-flow doctor-answers --schema answers.schema.json --answers answers.json [--json]
+```
+
+- Exits 0 when answers validate; exits 1 with validation errors.
+- `--json` emits `{ "ok": true|false, "errors": [...] }`.
+
 ## Output reference
 - add-step/update-step/delete-step/bind-component print a summary line; flows are written unless `--dry-run`/`--validate-only`.
 - Sidecar (`*.ygtc.resolve.json`): schema_version=1; `nodes.{id}.source` contains `kind` (`local` or `remote`), `path` or `reference`, and optional `digest` when `--pin` is used.

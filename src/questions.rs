@@ -183,7 +183,6 @@ pub fn extract_questions_from_flow(flow: &Value) -> Result<Vec<Question>> {
     }
     Ok(questions)
 }
-
 fn write_prompt<W: Write>(
     writer: &mut W,
     question: &Question,

@@ -17,6 +17,7 @@ pub mod loader;
 pub mod model;
 pub mod path_safety;
 pub mod questions;
+pub mod questions_schema;
 pub mod registry;
 pub mod resolve;
 pub mod resolve_summary;
