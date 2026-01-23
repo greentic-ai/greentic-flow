@@ -1,8 +1,8 @@
 [package]
 name = "greentic-flow"
-version = "0.4.32"
+version = "0.4.33"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.90"
 license = "MIT"
 description = "Generic YGTC flow schema/loader/IR for self-describing component nodes."
 repository = "https://github.com/greentic-ai/greentic-flow"
@@ -19,8 +19,8 @@ greentic-types = { version = "0.4", features = ["telemetry-autoinit", "schema"] 
 serde = { version = "1", features = ["derive"] }
 serde_yaml_bw = "2"
 serde_json = "1"
-handlebars = "5"
-jsonschema = { version = "0.38"}
+handlebars = "6"
+jsonschema = { version = "0.40"}
 thiserror = "2"
 regex = "1"
 indexmap = { version = "2", features = ["serde"] }
