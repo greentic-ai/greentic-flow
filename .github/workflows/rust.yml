@@ -19,9 +19,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: dtolnay/rust-toolchain@1.90.0
       with:
-        toolchain: stable
+        toolchain: 1.90.0
         override: true
     - name: Build
       run: cargo build --verbose

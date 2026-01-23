@@ -12,9 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
         with:
-          toolchain: stable
+          toolchain: 1.90.0
           override: true
           components: rustfmt
       - name: rustc --version
@@ -26,9 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
         with:
-          toolchain: stable
+          toolchain: 1.90.0
           override: true
           components: clippy
       - name: rustc --version
@@ -41,9 +41,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.90.0
         with:
-          toolchain: stable
+          toolchain: 1.90.0
           override: true
       - name: rustc --version
         run: rustc --version
