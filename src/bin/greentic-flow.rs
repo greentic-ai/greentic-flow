@@ -22,7 +22,7 @@ use greentic_flow::{
         normalize::normalize_node_map,
         normalize_node_id_hint, plan_add_step,
     },
-    component_catalog::ManifestCatalog,
+    component_catalog::{ManifestCatalog, normalize_manifest_value},
     config_flow::run_config_flow,
     error::FlowError,
     flow_bundle::{FlowBundle, load_and_validate_bundle_with_schema_text},
@@ -36,6 +36,7 @@ use greentic_flow::{
     },
     questions_schema::{example_for_questions, schema_for_questions},
     registry::AdapterCatalog,
+    resolve::resolve_parameters,
     resolve_summary::{remove_flow_resolve_summary_node, write_flow_resolve_summary_for_node},
 };
 use greentic_types::flow_resolve::{
@@ -634,16 +635,132 @@ fn lint_flow(
         Some(schema_path),
         source_path,
     )?;
-    let lint_errors = if let Some(cat) = registry {
+    let mut lint_errors = if let Some(cat) = registry {
         lint_with_registry(&flow, cat)
     } else {
         lint_builtin_rules(&flow)
     };
+    lint_errors.extend(lint_component_configs(
+        &flow,
+        source_path,
+        bundle.kind.as_str(),
+    ));
     Ok(LintResult {
         bundle,
         flow,
         lint_errors,
     })
+}
+
+fn lint_component_configs(
+    flow: &greentic_types::Flow,
+    source_path: Option<&Path>,
+    flow_kind: &str,
+) -> Vec<String> {
+    if flow_kind == "component-config" {
+        return Vec::new();
+    }
+    let Some(flow_path) = source_path else {
+        return Vec::new();
+    };
+    if !flow_path.exists() {
+        return Vec::new();
+    }
+    let sidecar_path = sidecar_path_for_flow(flow_path);
+    if !sidecar_path.exists() {
+        return Vec::new();
+    }
+    let sidecar = match read_flow_resolve(&sidecar_path) {
+        Ok(doc) => doc,
+        Err(err) => {
+            return vec![format!(
+                "component_config: failed to read sidecar {}: {err}",
+                sidecar_path.display()
+            )];
+        }
+    };
+
+    let mut errors = Vec::new();
+    for (node_id, node) in &flow.nodes {
+        let node_key = node_id.as_str();
+        if matches!(node.component.id.as_str(), "questions" | "template") {
+            continue;
+        }
+        let Some(entry) = sidecar.nodes.get(node_key) else {
+            continue;
+        };
+        let manifest_path = match resolve_component_manifest_path(&entry.source, flow_path) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let (component_id, schema) = match load_component_schema(&manifest_path) {
+            Ok(Some(pair)) => pair,
+            Ok(None) => continue,
+            Err(err) => {
+                errors.push(format!(
+                    "component_config: node '{node_key}' failed to read {}: {err}",
+                    manifest_path.display()
+                ));
+                continue;
+            }
+        };
+        let validator = match jsonschema::options()
+            .with_draft(Draft::Draft202012)
+            .build(&schema)
+        {
+            Ok(validator) => validator,
+            Err(err) => {
+                errors.push(format!(
+                    "component_config: node '{node_key}' schema compile failed for component '{}': {err}",
+                    component_id
+                ));
+                continue;
+            }
+        };
+        let payload = match resolve_parameters(
+            &node.input.mapping,
+            &flow.metadata.extra,
+            &format!("nodes.{node_key}"),
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                errors.push(format!(
+                    "component_config: node '{node_key}' parameters resolution failed: {err}",
+                ));
+                continue;
+            }
+        };
+        for err in validator.iter_errors(&payload) {
+            let pointer = err.instance_path().to_string();
+            let pointer = if pointer.is_empty() {
+                "/".to_string()
+            } else {
+                pointer
+            };
+            errors.push(format!(
+                "component_config: node '{node_key}' payload invalid for component '{}' at {pointer}: {err}",
+                component_id
+            ));
+        }
+    }
+
+    errors
+}
+
+fn load_component_schema(manifest_path: &Path) -> Result<Option<(String, serde_json::Value)>> {
+    let text = fs::read_to_string(manifest_path)
+        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
+    let mut json: serde_json::Value = serde_json::from_str(&text).context("parse manifest JSON")?;
+    normalize_manifest_value(&mut json);
+    let component_id = json
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let Some(schema) = json.get("config_schema") else {
+        return Ok(None);
+    };
+    Ok(Some((component_id, schema.clone())))
 }
 
 fn run_json(

@@ -1171,6 +1171,85 @@ entrypoints: {}
 }
 
 #[test]
+fn doctor_reports_component_config_schema_errors() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let wasm_path = dir.path().join("comp.wasm");
+    let manifest_path = dir.path().join("component.manifest.json");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+    fs::write(
+        &manifest_path,
+        r#"{"id":"ai.greentic.test","config_schema":{"type":"object","required":["message"],"properties":{"message":{"type":"string"}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    run:
+      message: 42
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("component_config"));
+}
+
+#[test]
+fn doctor_accepts_component_config_schema_matches() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    let sidecar_path = flow_path.with_extension("ygtc.resolve.json");
+    let wasm_path = dir.path().join("comp.wasm");
+    let manifest_path = dir.path().join("component.manifest.json");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+    fs::write(
+        &manifest_path,
+        r#"{"id":"ai.greentic.test","config_schema":{"type":"object","required":["message"],"properties":{"message":{"type":"string"}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  hello:
+    run:
+      message: "ok"
+    routing: out
+"#,
+    )
+    .unwrap();
+    fs::write(
+        &sidecar_path,
+        r#"{"schema_version":1,"flow":"flow.ygtc","nodes":{"hello":{"source":{"kind":"local","path":"comp.wasm"}}}}"#,
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .success();
+}
+
+#[test]
 fn update_step_preserves_when_no_answers() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");

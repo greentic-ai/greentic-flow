@@ -149,6 +149,7 @@ greentic-flow doctor --json --stdin < flows/main.ygtc
 
 Defaults to the embedded `schemas/ygtc.flow.schema.json`. `--json` emits a machine-readable report for one flow; `--registry` enables adapter_resolvable linting.
 Also updates the flow’s `*.ygtc.resolve.json` to drop stale node bindings and keep the flow name in sync.
+When a node is bound to a local component that provides `config_schema` in its manifest, the node payload is validated against that schema.
 
 ### answers
 Emit JSON Schema + example answers for a component operation without prompting.
