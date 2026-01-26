@@ -1250,6 +1250,111 @@ nodes:
 }
 
 #[test]
+fn add_step_rejects_component_payload_schema_mismatch() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    cargo_bin_cmd!("greentic-flow")
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    let manifest_path = dir.path().join("component.manifest.json");
+    fs::write(
+        &manifest_path,
+        r#"{"id":"ai.greentic.test","config_schema":{"type":"object","required":["message"],"properties":{"message":{"type":"string"}}}}"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("hello")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg(r#"{"message":42}"#)
+        .arg("--routing-out")
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("component_config"));
+}
+
+#[test]
+fn update_step_rejects_component_payload_schema_mismatch() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    cargo_bin_cmd!("greentic-flow")
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    let manifest_path = dir.path().join("component.manifest.json");
+    fs::write(
+        &manifest_path,
+        r#"{"id":"ai.greentic.test","config_schema":{"type":"object","required":["message"],"properties":{"message":{"type":"string"}}}}"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("hello")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg(r#"{"message":"ok"}"#)
+        .arg("--routing-out")
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .assert()
+        .success();
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("update-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--step")
+        .arg("hello")
+        .arg("--answers")
+        .arg(r#"{"message":42}"#)
+        .arg("--non-interactive")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("component_config"));
+}
+
+#[test]
 fn update_step_preserves_when_no_answers() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
@@ -2259,4 +2364,170 @@ nodes:
             .unwrap()
             .contains_key("mid")
     );
+}
+
+#[test]
+fn add_step_rejects_empty_manifest_schema_by_default() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    cargo_bin_cmd!("greentic-flow")
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    fs::write(
+        dir.path().join("component.manifest.json"),
+        r#"{"id":"ai.greentic.empty","operations":[{"name":"run","input_schema":{}}]}"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("empty")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg("{}")
+        .arg("--routing-out")
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("E_SCHEMA_EMPTY"));
+}
+
+#[test]
+fn add_step_warns_on_empty_manifest_schema_with_permissive_flag() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    cargo_bin_cmd!("greentic-flow")
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    let wasm_path = dir.path().join("comp.wasm");
+    fs::write(&wasm_path, b"wasm-bytes").unwrap();
+
+    fs::write(
+        dir.path().join("component.manifest.json"),
+        r#"{"id":"ai.greentic.empty","operations":[{"name":"run","input_schema":{}}]}"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("--permissive")
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--mode")
+        .arg("default")
+        .arg("--node-id")
+        .arg("empty")
+        .arg("--operation")
+        .arg("run")
+        .arg("--payload")
+        .arg("{}")
+        .arg("--routing-out")
+        .arg("--local-wasm")
+        .arg("comp.wasm")
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("W_SCHEMA_EMPTY"));
+}
+
+#[test]
+fn answers_error_on_empty_question_graph_by_default() {
+    let dir = tempdir().unwrap();
+    let manifest_path = dir.path().join("component.manifest.json");
+    let manifest = json!({
+        "id": "ai.greentic.empty",
+        "dev_flows": {
+            "default": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "start": "ask",
+                    "nodes": {
+                        "ask": {
+                            "template": "{}"
+                        }
+                    }
+                }
+            }
+        }
+    });
+    fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("answers")
+        .arg("--component")
+        .arg(&manifest_path)
+        .arg("--operation")
+        .arg("default")
+        .arg("--name")
+        .arg("empty")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("E_SCHEMA_EMPTY"));
+}
+
+#[test]
+fn answers_warns_on_empty_question_graph_with_permissive() {
+    let dir = tempdir().unwrap();
+    let manifest_path = dir.path().join("component.manifest.json");
+    let manifest = json!({
+        "id": "ai.greentic.empty",
+        "dev_flows": {
+            "default": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "start": "ask",
+                    "nodes": {
+                        "ask": {
+                            "template": "{}"
+                        }
+                    }
+                }
+            }
+        }
+    });
+    fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("--permissive")
+        .arg("answers")
+        .arg("--component")
+        .arg(&manifest_path)
+        .arg("--operation")
+        .arg("default")
+        .arg("--name")
+        .arg("empty")
+        .arg("--out-dir")
+        .arg(dir.path())
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("W_SCHEMA_EMPTY"));
 }

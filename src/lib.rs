@@ -6,6 +6,7 @@
 
 pub mod add_step;
 pub mod component_catalog;
+pub mod component_schema;
 pub mod config_flow;
 pub mod error;
 pub mod flow_bundle;
@@ -21,6 +22,7 @@ pub mod questions_schema;
 pub mod registry;
 pub mod resolve;
 pub mod resolve_summary;
+pub mod schema_mode;
 pub mod splice;
 pub mod template;
 pub mod util;

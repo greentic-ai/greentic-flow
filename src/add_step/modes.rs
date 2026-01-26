@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
@@ -21,6 +21,7 @@ pub enum AddStepModeInput {
         schema_path: Box<Path>,
         answers: Map<String, Value>,
         manifest_id: Option<String>,
+        manifest_path: Option<PathBuf>,
     },
 }
 
@@ -54,6 +55,7 @@ pub fn materialize_node(
             schema_path,
             answers,
             manifest_id,
+            manifest_path,
         } => {
             let _doc = load_ygtc_from_str_with_schema(&config_flow, &schema_path)?; // schema validation
             let output = run_config_flow(&config_flow, &schema_path, &answers, manifest_id)?;
@@ -62,6 +64,7 @@ pub fn materialize_node(
             if normalized.operation.is_empty() {
                 hint = None;
             }
+            let _ = manifest_path;
             Ok((hint, output.node))
         }
     }

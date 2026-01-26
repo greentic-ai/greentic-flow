@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{
     collections::BTreeSet,
@@ -22,7 +22,11 @@ use greentic_flow::{
         normalize::normalize_node_map,
         normalize_node_id_hint, plan_add_step,
     },
-    component_catalog::{ManifestCatalog, normalize_manifest_value},
+    component_catalog::ManifestCatalog,
+    component_schema::{
+        is_effectively_empty_schema, resolve_input_schema, schema_guidance,
+        validate_payload_against_schema,
+    },
     config_flow::run_config_flow,
     error::FlowError,
     flow_bundle::{FlowBundle, load_and_validate_bundle_with_schema_text},
@@ -38,6 +42,7 @@ use greentic_flow::{
     registry::AdapterCatalog,
     resolve::resolve_parameters,
     resolve_summary::{remove_flow_resolve_summary_node, write_flow_resolve_summary_for_node},
+    schema_mode::SchemaMode,
 };
 use greentic_types::flow_resolve::{
     ComponentSourceRefV1, FLOW_RESOLVE_SCHEMA_VERSION, FlowResolveV1, NodeResolveV1, ResolveModeV1,
@@ -51,6 +56,9 @@ use sha2::{Digest, Sha256};
 #[derive(Parser, Debug)]
 #[command(name = "greentic-flow", about = "Flow scaffolding helpers")]
 struct Cli {
+    /// Enable permissive schema handling (default: strict).
+    #[arg(long, global = true)]
+    permissive: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -261,20 +269,21 @@ enum AnswersMode {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let schema_mode = SchemaMode::resolve(cli.permissive)?;
     match cli.command {
         Commands::New(args) => handle_new(args),
         Commands::Update(args) => handle_update(args),
-        Commands::AddStep(args) => handle_add_step(args),
-        Commands::UpdateStep(args) => handle_update_step(args),
+        Commands::AddStep(args) => handle_add_step(args, schema_mode),
+        Commands::UpdateStep(args) => handle_update_step(args, schema_mode),
         Commands::DeleteStep(args) => handle_delete_step(args),
-        Commands::Doctor(args) => handle_doctor(args),
+        Commands::Doctor(args) => handle_doctor(args, schema_mode),
         Commands::DoctorAnswers(args) => handle_doctor_answers(args),
-        Commands::Answers(args) => handle_answers(args),
+        Commands::Answers(args) => handle_answers(args, schema_mode),
         Commands::BindComponent(args) => handle_bind_component(args),
     }
 }
 
-fn handle_doctor(args: DoctorArgs) -> Result<()> {
+fn handle_doctor(args: DoctorArgs, schema_mode: SchemaMode) -> Result<()> {
     if args.stdin && !args.json {
         anyhow::bail!("--stdin currently requires --json");
     }
@@ -299,6 +308,13 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
     } else {
         None
     };
+    let lint_ctx = LintContext {
+        schema_text: &schema_text,
+        schema_label: &schema_label,
+        schema_path: schema_path.as_path(),
+        registry: registry.as_ref(),
+        schema_mode,
+    };
 
     if args.json {
         let stdin_content = if args.stdin {
@@ -313,20 +329,13 @@ fn handle_doctor(args: DoctorArgs) -> Result<()> {
             &schema_label,
             &schema_path,
             registry.as_ref(),
+            schema_mode,
         );
     }
 
     let mut failures = 0usize;
     for target in &args.targets {
-        lint_path(
-            target,
-            &schema_text,
-            &schema_label,
-            &schema_path,
-            registry.as_ref(),
-            true,
-            &mut failures,
-        )?;
+        lint_path(target, &lint_ctx, true, &mut failures)?;
     }
 
     if failures == 0 {
@@ -399,7 +408,7 @@ fn handle_doctor_answers(args: DoctorAnswersArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_answers(args: AnswersArgs) -> Result<()> {
+fn handle_answers(args: AnswersArgs, schema_mode: SchemaMode) -> Result<()> {
     let manifest_path = resolve_manifest_path_for_component(&args.component)?;
     let manifest = load_manifest_json(&manifest_path)?;
     let requested_flow = match args.mode {
@@ -408,7 +417,7 @@ fn handle_answers(args: AnswersArgs) -> Result<()> {
     };
     let (questions, used_flow) = questions_for_operation(&manifest, requested_flow)?;
     if used_flow.as_deref() != Some(requested_flow)
-        && let Some(flow) = used_flow
+        && let Some(flow) = &used_flow
     {
         eprintln!(
             "warning: dev_flows.{} not found; using dev_flows.{} for questions",
@@ -416,7 +425,33 @@ fn handle_answers(args: AnswersArgs) -> Result<()> {
         );
     }
 
+    let flow_name = used_flow.as_deref().unwrap_or(requested_flow);
+    let source_desc = format!("dev_flows.{flow_name}");
+    let component_id = manifest
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     let schema = schema_for_questions(&questions);
+    if questions.is_empty() {
+        require_schema(
+            schema_mode,
+            component_id,
+            flow_name,
+            &manifest_path,
+            &source_desc,
+            None,
+        )?;
+    } else {
+        require_schema(
+            schema_mode,
+            component_id,
+            flow_name,
+            &manifest_path,
+            &source_desc,
+            Some(&schema),
+        )?;
+    }
+
     let example = example_for_questions(&questions);
     validate_example_against_schema(&schema, &example)?;
 
@@ -492,40 +527,29 @@ fn handle_update(args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
+struct LintContext<'a> {
+    schema_text: &'a str,
+    schema_label: &'a str,
+    schema_path: &'a Path,
+    registry: Option<&'a AdapterCatalog>,
+    schema_mode: SchemaMode,
+}
+
 fn lint_path(
     path: &Path,
-    schema_text: &str,
-    schema_label: &str,
-    schema_path: &Path,
-    registry: Option<&AdapterCatalog>,
+    ctx: &LintContext<'_>,
     interactive: bool,
     failures: &mut usize,
 ) -> Result<()> {
     if path.is_file() {
-        lint_file(
-            path,
-            schema_text,
-            schema_label,
-            schema_path,
-            registry,
-            interactive,
-            failures,
-        )?;
+        lint_file(path, ctx, interactive, failures)?;
     } else if path.is_dir() {
         let entries = fs::read_dir(path)
             .with_context(|| format!("failed to read directory {}", path.display()))?;
         for entry in entries {
             let entry = entry
                 .with_context(|| format!("failed to read directory entry in {}", path.display()))?;
-            lint_path(
-                &entry.path(),
-                schema_text,
-                schema_label,
-                schema_path,
-                registry,
-                interactive,
-                failures,
-            )?;
+            lint_path(&entry.path(), ctx, interactive, failures)?;
         }
     }
     Ok(())
@@ -533,10 +557,7 @@ fn lint_path(
 
 fn lint_file(
     path: &Path,
-    schema_text: &str,
-    schema_label: &str,
-    schema_path: &Path,
-    registry: Option<&AdapterCatalog>,
+    ctx: &LintContext<'_>,
     interactive: bool,
     failures: &mut usize,
 ) -> Result<()> {
@@ -550,10 +571,11 @@ fn lint_file(
     match lint_flow(
         &content,
         Some(path),
-        schema_text,
-        schema_label,
-        schema_path,
-        registry,
+        ctx.schema_text,
+        ctx.schema_label,
+        ctx.schema_path,
+        ctx.registry,
+        ctx.schema_mode,
     ) {
         Ok(result) => {
             let mut had_errors = false;
@@ -627,6 +649,7 @@ fn lint_flow(
     schema_label: &str,
     schema_path: &Path,
     registry: Option<&AdapterCatalog>,
+    schema_mode: SchemaMode,
 ) -> Result<LintResult, FlowError> {
     let (bundle, flow) = load_and_validate_bundle_with_schema_text(
         content,
@@ -644,6 +667,7 @@ fn lint_flow(
         &flow,
         source_path,
         bundle.kind.as_str(),
+        schema_mode,
     ));
     Ok(LintResult {
         bundle,
@@ -656,6 +680,7 @@ fn lint_component_configs(
     flow: &greentic_types::Flow,
     source_path: Option<&Path>,
     flow_kind: &str,
+    schema_mode: SchemaMode,
 ) -> Vec<String> {
     if flow_kind == "component-config" {
         return Vec::new();
@@ -693,9 +718,9 @@ fn lint_component_configs(
             Ok(path) => path,
             Err(_) => continue,
         };
-        let (component_id, schema) = match load_component_schema(&manifest_path) {
-            Ok(Some(pair)) => pair,
-            Ok(None) => continue,
+        let operation = node.component.operation.as_deref().unwrap_or("unknown");
+        let schema_resolution = match resolve_input_schema(&manifest_path, operation) {
+            Ok(resolution) => resolution,
             Err(err) => {
                 errors.push(format!(
                     "component_config: node '{node_key}' failed to read {}: {err}",
@@ -704,15 +729,31 @@ fn lint_component_configs(
                 continue;
             }
         };
+        let source_desc = "operations[].input_schema";
+        let schema_ref = match require_schema(
+            schema_mode,
+            &schema_resolution.component_id,
+            &schema_resolution.operation,
+            &schema_resolution.manifest_path,
+            source_desc,
+            schema_resolution.schema.as_ref(),
+        ) {
+            Ok(Some(schema)) => schema,
+            Ok(None) => continue,
+            Err(err) => {
+                errors.push(err.to_string());
+                continue;
+            }
+        };
         let validator = match jsonschema::options()
             .with_draft(Draft::Draft202012)
-            .build(&schema)
+            .build(schema_ref)
         {
             Ok(validator) => validator,
             Err(err) => {
                 errors.push(format!(
                     "component_config: node '{node_key}' schema compile failed for component '{}': {err}",
-                    component_id
+                    schema_resolution.component_id
                 ));
                 continue;
             }
@@ -739,28 +780,12 @@ fn lint_component_configs(
             };
             errors.push(format!(
                 "component_config: node '{node_key}' payload invalid for component '{}' at {pointer}: {err}",
-                component_id
+                schema_resolution.component_id
             ));
         }
     }
 
     errors
-}
-
-fn load_component_schema(manifest_path: &Path) -> Result<Option<(String, serde_json::Value)>> {
-    let text = fs::read_to_string(manifest_path)
-        .with_context(|| format!("read manifest {}", manifest_path.display()))?;
-    let mut json: serde_json::Value = serde_json::from_str(&text).context("parse manifest JSON")?;
-    normalize_manifest_value(&mut json);
-    let component_id = json
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown")
-        .to_string();
-    let Some(schema) = json.get("config_schema") else {
-        return Ok(None);
-    };
-    Ok(Some((component_id, schema.clone())))
 }
 
 fn run_json(
@@ -770,6 +795,7 @@ fn run_json(
     schema_label: &str,
     schema_path: &Path,
     registry: Option<&AdapterCatalog>,
+    schema_mode: SchemaMode,
 ) -> Result<()> {
     let (content, source_display, source_path) = if let Some(stdin_flow) = stdin_content {
         (
@@ -807,6 +833,7 @@ fn run_json(
         schema_label,
         schema_path,
         registry,
+        schema_mode,
     );
 
     let output = match lint_result {
@@ -1390,7 +1417,7 @@ fn infer_node_id_hint(args: &AddStepArgs) -> Option<String> {
     None
 }
 
-fn handle_add_step(args: AddStepArgs) -> Result<()> {
+fn handle_add_step(args: AddStepArgs, schema_mode: SchemaMode) -> Result<()> {
     let (routing_value, require_placeholder) = build_routing_value(&args)?;
     let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
     let (component_source, resolve_mode) = resolve_component_source_inputs(
@@ -1401,10 +1428,23 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
     )?;
     let doc = load_ygtc_from_path(&args.flow_path)?;
     let flow_ir = FlowIr::from_doc(doc)?;
+    let manifest_path_for_schema = args
+        .manifests
+        .first()
+        .cloned()
+        .or_else(|| resolve_component_manifest_path(&component_source, &args.flow_path).ok());
     let mut manifest_paths = args.manifests.clone();
+    if args.mode == AddStepMode::Config
+        && args.config_flow.is_none()
+        && manifest_paths.is_empty()
+        && let Some(path) = manifest_path_for_schema.clone()
+    {
+        manifest_paths.push(path);
+    }
     if args.mode == AddStepMode::Config && args.config_flow.is_none() && manifest_paths.is_empty() {
-        let manifest_path = resolve_component_manifest_path(&component_source, &args.flow_path)?;
-        manifest_paths.push(manifest_path);
+        anyhow::bail!(
+            "config mode requires --config-flow or a component manifest to provide dev_flows.custom"
+        );
     }
     let catalog = ManifestCatalog::load_from_paths(&manifest_paths);
 
@@ -1426,17 +1466,13 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
             let mut payload_json: serde_json::Value =
                 serde_json::from_str(&args.payload).context("parse --payload as JSON")?;
             let mut used_writes = false;
-            let manifest_path = if let Some(path) = args.manifests.first() {
-                Some(path.clone())
-            } else {
-                resolve_component_manifest_path(&component_source, &args.flow_path).ok()
-            };
-            if let Some(path) = manifest_path {
-                let manifest = load_manifest_json(&path)?;
+            let mut used_dev_flow = false;
+            if let Some(manifest_path) = &manifest_path_for_schema {
+                let manifest = load_manifest_json(manifest_path)?;
                 if let Some(name) = component_name_from_manifest(&manifest) {
                     component_label = name;
                 }
-                let questions = questions_from_manifest(&path, "default")?;
+                let questions = questions_from_manifest(manifest_path, "default")?;
                 if !questions.is_empty() {
                     warn_unknown_keys(&answers, &questions);
                     println!("{}", wizard_header(&component_label, "default"));
@@ -1449,6 +1485,7 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
                         payload_json = apply_writes_to(payload_json, &questions, &answers)?;
                         used_writes = true;
                     }
+                    used_dev_flow = true;
                 }
             }
             let operation = args.operation.clone().ok_or_else(|| {
@@ -1458,6 +1495,20 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
             })?;
             if !used_writes {
                 payload_json = merge_payload(payload_json, answers_to_value(&answers));
+            }
+            if !used_dev_flow && let Some(manifest_path) = &manifest_path_for_schema {
+                let schema_resolution = resolve_input_schema(manifest_path, &operation)?;
+                let schema_present = require_schema(
+                    schema_mode,
+                    &schema_resolution.component_id,
+                    &schema_resolution.operation,
+                    &schema_resolution.manifest_path,
+                    "operations[].input_schema",
+                    schema_resolution.schema.as_ref(),
+                )?;
+                if schema_present.is_some() {
+                    validate_payload_against_schema(&schema_resolution, &payload_json)?;
+                }
             }
             let routing_json = routing_value.clone();
             (
@@ -1488,12 +1539,16 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
                     answers = run_interactive_with_seed(&questions, answers)?;
                 }
             }
+            let manifest_path_for_validation = manifest_paths.first().cloned().or_else(|| {
+                resolve_component_manifest_path(&component_source, &args.flow_path).ok()
+            });
             (
                 AddStepModeInput::Config {
                     config_flow,
                     schema_path: schema_path.into_boxed_path(),
                     answers: answers_to_json_map(answers),
                     manifest_id: Some(component_label.clone()),
+                    manifest_path: manifest_path_for_validation,
                 },
                 true,
             )
@@ -1563,7 +1618,7 @@ fn handle_add_step(args: AddStepArgs) -> Result<()> {
     Ok(())
 }
 
-fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
+fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<()> {
     let (_sidecar_path, sidecar) = ensure_sidecar(&args.flow_path)?;
     if let Some(component) = args.component.as_deref() {
         validate_component_ref(component)?;
@@ -1599,7 +1654,8 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
         if let Some(name) = component_name_from_manifest(&manifest) {
             component_label = name;
         }
-        let (config_flow, schema_path) = resolve_config_flow(None, &[manifest_path], "custom")?;
+        let (config_flow, schema_path) =
+            resolve_config_flow(None, std::slice::from_ref(&manifest_path), "custom")?;
         let mut base_answers = QuestionAnswers::new();
         if let Some(obj) = merged_payload.as_object() {
             base_answers.extend(obj.clone());
@@ -1614,6 +1670,28 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
             } else {
                 base_answers = run_interactive_with_seed(&questions, base_answers)?;
             }
+        }
+        let flow_name = "custom";
+        let source_desc = format!("dev_flows.{flow_name}");
+        if questions.is_empty() {
+            require_schema(
+                schema_mode,
+                &component_label,
+                flow_name,
+                &manifest_path,
+                &source_desc,
+                None,
+            )?;
+        } else {
+            let dev_schema = schema_for_questions(&questions);
+            require_schema(
+                schema_mode,
+                &component_label,
+                flow_name,
+                &manifest_path,
+                &source_desc,
+                Some(&dev_schema),
+            )?;
         }
         let answers_map = answers_to_json_map(base_answers);
         let output = run_config_flow(
@@ -1630,9 +1708,11 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
     } else if args.mode == "default" {
         let mut payload = merged_payload;
         let mut used_writes = false;
+        let mut manifest_path_for_validation: Option<PathBuf> = None;
         if let Ok(manifest_path) =
             resolve_component_manifest_path(&sidecar_entry.source, &args.flow_path)
         {
+            manifest_path_for_validation = Some(manifest_path.clone());
             let manifest = load_manifest_json(&manifest_path)?;
             if let Some(name) = component_name_from_manifest(&manifest) {
                 component_label = name;
@@ -1655,11 +1735,26 @@ fn handle_update_step(args: UpdateStepArgs) -> Result<()> {
                 }
             }
         }
-        if used_writes {
-            payload
+        let final_payload = if used_writes {
+            payload.clone()
         } else {
             merge_payload(payload, answers_to_value(&answers))
+        };
+        if let Some(manifest_path) = manifest_path_for_validation.as_ref() {
+            let schema_resolution = resolve_input_schema(manifest_path, &new_operation)?;
+            let schema_present = require_schema(
+                schema_mode,
+                &schema_resolution.component_id,
+                &schema_resolution.operation,
+                &schema_resolution.manifest_path,
+                "operations[].input_schema",
+                schema_resolution.schema.as_ref(),
+            )?;
+            if schema_present.is_some() {
+                validate_payload_against_schema(&schema_resolution, &final_payload)?;
+            }
         }
+        final_payload
     } else {
         merged_payload
     };
@@ -1829,6 +1924,50 @@ fn handle_bind_component(args: BindComponentArgs) -> Result<()> {
         writeln!(stdout)?;
     }
     Ok(())
+}
+
+fn require_schema<'a>(
+    mode: SchemaMode,
+    component_id: &str,
+    operation: &str,
+    manifest_path: &Path,
+    source_desc: &str,
+    schema: Option<&'a serde_json::Value>,
+) -> Result<Option<&'a serde_json::Value>> {
+    if let Some(schema) = schema {
+        if is_effectively_empty_schema(schema) {
+            report_empty_schema(mode, component_id, operation, manifest_path, source_desc)?;
+            return Ok(None);
+        }
+        Ok(Some(schema))
+    } else {
+        report_empty_schema(mode, component_id, operation, manifest_path, source_desc)?;
+        Ok(None)
+    }
+}
+
+fn report_empty_schema(
+    mode: SchemaMode,
+    component_id: &str,
+    operation: &str,
+    manifest_path: &Path,
+    source_desc: &str,
+) -> Result<()> {
+    let base = format!(
+        "component '{}', operation '{}', schema missing or empty at {} (source: {})",
+        component_id,
+        operation,
+        manifest_path.display(),
+        source_desc
+    );
+    let guidance = schema_guidance();
+    match mode {
+        SchemaMode::Strict => Err(anyhow!("E_SCHEMA_EMPTY: {base}. {guidance}")),
+        SchemaMode::Permissive => {
+            eprintln!("W_SCHEMA_EMPTY: {base}. {guidance} Validation disabled (permissive).");
+            Ok(())
+        }
+    }
 }
 
 fn parse_answers_map(
