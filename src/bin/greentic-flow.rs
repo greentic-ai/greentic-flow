@@ -433,7 +433,8 @@ fn handle_answers(args: AnswersArgs, schema_mode: SchemaMode) -> Result<()> {
         .unwrap_or("unknown")
         .to_string();
     let schema = schema_for_questions(&questions);
-    let schema_resolution = if questions.is_empty() {
+    let use_manifest_schema = questions.is_empty() || is_effectively_empty_schema(&schema);
+    let schema_resolution = if use_manifest_schema {
         Some(resolve_input_schema(&manifest_path, &args.operation)?)
     } else {
         None

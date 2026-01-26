@@ -2531,3 +2531,62 @@ fn answers_warns_on_empty_question_graph_with_permissive() {
         .success()
         .stderr(predicates::str::contains("W_SCHEMA_EMPTY"));
 }
+
+#[test]
+fn answers_prefers_operations_schema_when_dev_flow_questions_empty() {
+    let dir = tempdir().unwrap();
+    let manifest_path = dir.path().join("component.manifest.json");
+    let manifest = json!({
+        "id": "ai.greentic.empty-with-ops",
+        "operations": [
+            {
+                "name": "default",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "foo": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        ],
+        "dev_flows": {
+            "default": {
+                "graph": {
+                    "id": "cfg",
+                    "type": "component-config",
+                    "start": "ask",
+                    "nodes": {
+                        "ask": {
+                            "questions": {
+                                "fields": []
+                            },
+                            "routing": [
+                                { "to": "emit" }
+                            ]
+                        },
+                        "emit": {
+                            "template": "{}"
+                        }
+                    }
+                }
+            }
+        }
+    });
+    fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("answers")
+        .arg("--component")
+        .arg(&manifest_path)
+        .arg("--operation")
+        .arg("default")
+        .arg("--name")
+        .arg("empty-with-ops")
+        .arg("--out-dir")
+        .arg(dir.path())
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("E_SCHEMA_EMPTY").not());
+}
