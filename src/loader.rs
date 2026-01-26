@@ -7,11 +7,39 @@ use crate::{
 use serde::Deserialize;
 use serde_json::Value;
 use serde_yaml_bw::Location as YamlLocation;
-use std::{fs, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 const INLINE_SOURCE: &str = "<inline>";
 const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
 const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
+
+/// Ensure a temporary copy of the embedded flow schema exists and return its path.
+pub fn ensure_config_schema_path() -> io::Result<PathBuf> {
+    static CONFIG_SCHEMA_PATH: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = CONFIG_SCHEMA_PATH.get() {
+        return Ok(path.clone());
+    }
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "greentic-flow-config-schema-{}.json",
+        env!("CARGO_PKG_VERSION")
+    ));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, EMBEDDED_SCHEMA)?;
+    match CONFIG_SCHEMA_PATH.set(path.clone()) {
+        Ok(()) => Ok(path),
+        Err(_) => Ok(CONFIG_SCHEMA_PATH
+            .get()
+            .expect("config schema path set")
+            .clone()),
+    }
+}
 
 /// Load YGTC YAML from a string using the embedded schema.
 pub fn load_ygtc_from_str(yaml: &str) -> Result<FlowDoc> {

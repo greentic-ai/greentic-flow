@@ -33,7 +33,7 @@ use greentic_flow::{
     flow_ir::FlowIr,
     json_output::LintJsonOutput,
     lint::{lint_builtin_rules, lint_with_registry},
-    loader::{load_ygtc_from_path, load_ygtc_from_str},
+    loader::{ensure_config_schema_path, load_ygtc_from_path, load_ygtc_from_str},
     questions::{
         Answers as QuestionAnswers, Question, apply_writes_to, extract_answers_from_payload,
         extract_questions_from_flow, run_interactive_with_seed, validate_required,
@@ -946,7 +946,8 @@ mod tests {
     use super::parse_answers_map;
     use super::resolve_config_flow;
     use serde_json::json;
-    use std::path::PathBuf;
+    use std::env;
+    use std::fs;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -970,9 +971,35 @@ mod tests {
             resolve_config_flow(None, &[manifest_file.path().to_path_buf()], "default")
                 .expect("resolve");
         assert!(yaml.contains("id: cfg"));
-        assert_eq!(
-            schema_path,
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas/ygtc.flow.schema.json")
+        assert!(
+            schema_path.starts_with(env::temp_dir()),
+            "expected schema path {schema_path:?} under the temp directory"
+        );
+    }
+
+    #[test]
+    fn config_flow_schema_resides_in_temp_dir() {
+        let manifest = json!({
+            "id": "ai.greentic.custom",
+            "dev_flows": {
+                "custom": {
+                    "graph": {
+                        "id": "cfg",
+                        "type": "component-config",
+                        "nodes": {}
+                    }
+                }
+            }
+        });
+        let manifest_file = NamedTempFile::new().expect("temp file");
+        fs::write(manifest_file.path(), manifest.to_string()).expect("write manifest");
+
+        let (_, schema_path) =
+            resolve_config_flow(None, &[manifest_file.path().to_path_buf()], "custom")
+                .expect("resolve");
+        assert!(
+            schema_path.starts_with(env::temp_dir()),
+            "expected schema path {schema_path:?} to live in temp dir"
         );
     }
 
@@ -1059,9 +1086,8 @@ fn resolve_config_flow_from_manifest(
     }
     let yaml =
         serde_yaml_bw::to_string(&graph).context("render dev_flows.default.graph to YAML")?;
-    // Use repo-local schema path as a reasonable default (absolute to avoid cwd issues).
     let schema_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas/ygtc.flow.schema.json");
+        ensure_config_schema_path().context("prepare embedded flow schema for config flows")?;
     Ok((yaml, schema_path))
 }
 
