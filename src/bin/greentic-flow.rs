@@ -49,7 +49,8 @@ use greentic_types::flow_resolve::{
     read_flow_resolve, sidecar_path_for_flow, write_flow_resolve,
 };
 use indexmap::IndexMap;
-use jsonschema::Draft;
+use jsonschema::error::ValidationErrorKind;
+use jsonschema::{Draft, ReferencingError};
 use pathdiff::diff_paths;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -767,6 +768,22 @@ fn lint_component_configs(
         {
             Ok(validator) => validator,
             Err(err) => {
+                if let ValidationErrorKind::Referencing(ReferencingError::Unretrievable {
+                    uri,
+                    ..
+                }) = err.kind()
+                {
+                    if uri.starts_with("file://")
+                        && !Path::new(uri.trim_start_matches("file://")).exists()
+                    {
+                        eprintln!(
+                            "WARN component_config: node '{node_key}' schema validation for component '{}' skipped because '{uri}' is missing (manifest: {}). Continuing without this schema.",
+                            schema_resolution.component_id,
+                            manifest_path.display()
+                        );
+                        continue;
+                    }
+                }
                 errors.push(format!(
                     "component_config: node '{node_key}' schema compile failed for component '{}': {err}",
                     schema_resolution.component_id
