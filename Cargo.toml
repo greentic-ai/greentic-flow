@@ -1,6 +1,6 @@
 [package]
 name = "greentic-flow"
-version = "0.4.35"
+version = "0.4.34"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -33,6 +33,7 @@ pathdiff = "0.2"
 sha2 = "0.10"
 semver = "1"
 greentic-distributor-client = { version = "0.4", default-features = false, features = ["dist-client"] }
+url = "2"
 
 [dev-dependencies]
 assert_cmd = "2"

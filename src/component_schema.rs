@@ -8,6 +8,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use url::Url;
 
 const SCHEMA_GUIDANCE: &str = "Define operations[].input_schema with real JSON Schema or define dev_flows.<op> questions/schema.";
 
@@ -167,8 +168,7 @@ pub fn validate_payload_against_schema(ctx: &SchemaResolution, payload: &Value) 
         ),
         location: FlowErrorLocation::at_path(ctx.manifest_path.display().to_string()),
     })?;
-    let validator = jsonschema::options()
-        .with_draft(Draft::Draft202012)
+    let validator = jsonschema_options_with_base(Some(ctx.manifest_path.as_path()))
         .build(schema)
         .map_err(|err| FlowError::Internal {
             message: format!(
@@ -198,6 +198,24 @@ pub fn validate_payload_against_schema(ctx: &SchemaResolution, payload: &Value) 
             location: FlowErrorLocation::at_path(ctx.manifest_path.display().to_string()),
         })
     }
+}
+
+pub fn jsonschema_options_with_base(base_path: Option<&Path>) -> jsonschema::ValidationOptions {
+    let mut options = jsonschema::options().with_draft(Draft::Draft202012);
+    if let Some(base_uri) = base_uri_for_path(base_path) {
+        options = options.with_base_uri(base_uri);
+    }
+    options
+}
+
+fn base_uri_for_path(path: Option<&Path>) -> Option<String> {
+    let base_dir = path?.parent()?;
+    let canonical_dir = base_dir.canonicalize().ok()?;
+    let mut url = Url::from_directory_path(&canonical_dir).ok()?;
+    if !url.path().ends_with('/') {
+        url.set_path(&format!("{}/", url.path().trim_end_matches('/')));
+    }
+    Some(url.to_string())
 }
 
 pub fn schema_guidance() -> &'static str {

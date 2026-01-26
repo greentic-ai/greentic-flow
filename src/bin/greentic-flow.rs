@@ -24,8 +24,8 @@ use greentic_flow::{
     },
     component_catalog::ManifestCatalog,
     component_schema::{
-        is_effectively_empty_schema, resolve_input_schema, schema_guidance,
-        validate_payload_against_schema,
+        is_effectively_empty_schema, jsonschema_options_with_base, resolve_input_schema,
+        schema_guidance, validate_payload_against_schema,
     },
     config_flow::run_config_flow,
     error::FlowError,
@@ -430,27 +430,43 @@ fn handle_answers(args: AnswersArgs, schema_mode: SchemaMode) -> Result<()> {
     let component_id = manifest
         .get("id")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .unwrap_or("unknown")
+        .to_string();
     let schema = schema_for_questions(&questions);
-    if questions.is_empty() {
-        require_schema(
-            schema_mode,
-            component_id,
-            flow_name,
-            &manifest_path,
-            &source_desc,
-            None,
-        )?;
+    let schema_resolution = if questions.is_empty() {
+        Some(resolve_input_schema(&manifest_path, &args.operation)?)
     } else {
-        require_schema(
-            schema_mode,
-            component_id,
-            flow_name,
-            &manifest_path,
-            &source_desc,
-            Some(&schema),
-        )?;
-    }
+        None
+    };
+    let (schema_source_desc, schema_operation, schema_manifest_path, schema_component_id) =
+        if let Some(resolution) = &schema_resolution {
+            (
+                "operations[].input_schema".to_string(),
+                resolution.operation.clone(),
+                resolution.manifest_path.as_path(),
+                resolution.component_id.as_str(),
+            )
+        } else {
+            (
+                source_desc,
+                flow_name.to_string(),
+                manifest_path.as_path(),
+                component_id.as_str(),
+            )
+        };
+    let schema_ref = if let Some(resolution) = &schema_resolution {
+        resolution.schema.as_ref()
+    } else {
+        Some(&schema)
+    };
+    require_schema(
+        schema_mode,
+        schema_component_id,
+        &schema_operation,
+        schema_manifest_path,
+        &schema_source_desc,
+        schema_ref,
+    )?;
 
     let example = example_for_questions(&questions);
     validate_example_against_schema(&schema, &example)?;
@@ -745,8 +761,7 @@ fn lint_component_configs(
                 continue;
             }
         };
-        let validator = match jsonschema::options()
-            .with_draft(Draft::Draft202012)
+        let validator = match jsonschema_options_with_base(Some(manifest_path.as_path()))
             .build(schema_ref)
         {
             Ok(validator) => validator,

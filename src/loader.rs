@@ -1,9 +1,9 @@
 use crate::{
+    component_schema::jsonschema_options_with_base,
     error::{FlowError, FlowErrorLocation, Result, SchemaErrorDetail},
     model::FlowDoc,
     path_safety::normalize_under_root,
 };
-use jsonschema::Draft;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_yaml_bw::Location as YamlLocation;
@@ -330,8 +330,7 @@ fn validate_json(
         location: FlowErrorLocation::at_path(schema_label.to_string())
             .with_source_path(schema_path),
     })?;
-    let validator = jsonschema::options()
-        .with_draft(Draft::Draft202012)
+    let validator = jsonschema_options_with_base(schema_path)
         .build(&schema)
         .map_err(|e| FlowError::Internal {
             message: format!("schema compile for {schema_label}: {e}"),
