@@ -769,20 +769,17 @@ fn lint_component_configs(
             Ok(validator) => validator,
             Err(err) => {
                 if let ValidationErrorKind::Referencing(ReferencingError::Unretrievable {
-                    uri,
-                    ..
+                    uri, ..
                 }) = err.kind()
+                    && uri.starts_with("file://")
+                    && !Path::new(uri.trim_start_matches("file://")).exists()
                 {
-                    if uri.starts_with("file://")
-                        && !Path::new(uri.trim_start_matches("file://")).exists()
-                    {
-                        eprintln!(
-                            "WARN component_config: node '{node_key}' schema validation for component '{}' skipped because '{uri}' is missing (manifest: {}). Continuing without this schema.",
-                            schema_resolution.component_id,
-                            manifest_path.display()
-                        );
-                        continue;
-                    }
+                    eprintln!(
+                        "WARN component_config: node '{node_key}' schema validation for component '{}' skipped because '{uri}' is missing (manifest: {}). Continuing without this schema.",
+                        schema_resolution.component_id,
+                        manifest_path.display()
+                    );
+                    continue;
                 }
                 errors.push(format!(
                     "component_config: node '{node_key}' schema compile failed for component '{}': {err}",
