@@ -34,6 +34,8 @@ pub struct FlowDoc {
     pub schema_version: Option<u32>,
     #[serde(default = "default_entrypoints")]
     pub entrypoints: IndexMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
     pub nodes: IndexMap<String, NodeDoc>,
 }
 

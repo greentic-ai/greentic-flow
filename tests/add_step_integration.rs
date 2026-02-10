@@ -68,9 +68,15 @@ fn add_step_with_real_manifest_catalog() {
 
     let flow = FlowIr {
         id: "real-flow".to_string(),
+        title: None,
+        description: None,
         kind: "messaging".to_string(),
+        start: None,
+        parameters: serde_json::Value::Object(Default::default()),
+        tags: Vec::new(),
         schema_version: Some(2),
         entrypoints: indexmap! {"default".to_string() => "start".to_string()},
+        meta: None,
         nodes,
     };
 

@@ -24,6 +24,11 @@
     },
     "start": { "type": "string" },
     "parameters": { "type": "object", "additionalProperties": true },
+    "meta": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Optional namespaced metadata (e.g., meta.greentic.*)."
+    },
     "entrypoints": {
       "type": "object",
       "additionalProperties": true,

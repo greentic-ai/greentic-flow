@@ -242,9 +242,15 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
         nodes.insert(plan.new_node.id.clone(), plan.new_node);
         return Ok(FlowIr {
             id: flow.id.clone(),
+            title: flow.title.clone(),
+            description: flow.description.clone(),
             kind: flow.kind.clone(),
+            start: flow.start.clone(),
+            parameters: flow.parameters.clone(),
+            tags: flow.tags.clone(),
             schema_version: flow.schema_version,
             entrypoints,
+            meta: flow.meta.clone(),
             nodes,
         });
     }
@@ -273,9 +279,15 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
 
         return Ok(FlowIr {
             id: flow.id.clone(),
+            title: flow.title.clone(),
+            description: flow.description.clone(),
             kind: flow.kind.clone(),
+            start: flow.start.clone(),
+            parameters: flow.parameters.clone(),
+            tags: flow.tags.clone(),
             schema_version: flow.schema_version,
             entrypoints,
+            meta: flow.meta.clone(),
             nodes: new_nodes,
         });
     }
@@ -308,9 +320,15 @@ pub fn apply_plan(flow: &FlowIr, plan: AddStepPlan, allow_cycles: bool) -> Resul
 
     Ok(FlowIr {
         id: flow.id.clone(),
+        title: flow.title.clone(),
+        description: flow.description.clone(),
         kind: flow.kind.clone(),
+        start: flow.start.clone(),
+        parameters: flow.parameters.clone(),
+        tags: flow.tags.clone(),
         schema_version: flow.schema_version,
         entrypoints: flow.entrypoints.clone(),
+        meta: flow.meta.clone(),
         nodes: reordered,
     })
 }

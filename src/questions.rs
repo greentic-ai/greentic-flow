@@ -9,6 +9,7 @@ pub enum QuestionKind {
     Bool,
     Choice,
     Int,
+    Float,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +158,7 @@ pub fn extract_questions_from_flow(flow: &Value) -> Result<Vec<Question>> {
             let kind = match field.get("type").and_then(Value::as_str) {
                 Some("bool") | Some("boolean") => QuestionKind::Bool,
                 Some("int") | Some("integer") => QuestionKind::Int,
+                Some("float") | Some("number") => QuestionKind::Float,
                 Some("choice") | Some("enum") => QuestionKind::Choice,
                 _ => QuestionKind::String,
             };
@@ -223,6 +225,12 @@ fn parse_answer(raw: &str, question: &Question) -> Result<Value> {
         QuestionKind::Int => {
             let parsed = raw.parse::<i64>().map_err(|_| anyhow!("invalid integer"))?;
             Ok(Value::Number(parsed.into()))
+        }
+        QuestionKind::Float => {
+            let parsed = raw.parse::<f64>().map_err(|_| anyhow!("invalid number"))?;
+            let number =
+                serde_json::Number::from_f64(parsed).ok_or_else(|| anyhow!("invalid number"))?;
+            Ok(Value::Number(number))
         }
         QuestionKind::Choice => parse_choice(raw, question),
     }
@@ -414,6 +422,10 @@ fn template_for_questions(questions: &[Question], answers: &Answers) -> Value {
             match question.kind {
                 QuestionKind::Bool => Value::Bool(false),
                 QuestionKind::Int => Value::Number(0.into()),
+                QuestionKind::Float => Value::Number(
+                    serde_json::Number::from_f64(0.0)
+                        .unwrap_or_else(|| serde_json::Number::from(0)),
+                ),
                 QuestionKind::Choice => question
                     .choices
                     .first()

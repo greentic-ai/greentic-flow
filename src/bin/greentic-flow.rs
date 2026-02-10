@@ -14,7 +14,10 @@ const EMBEDDED_FLOW_SCHEMA: &str = include_str!(concat!(
     "/schemas/ygtc.flow.schema.json"
 ));
 
-use greentic_distributor_client::DistClient;
+use greentic_distributor_client::{
+    DistClient, DistributorClient, DistributorClientConfig, DistributorEnvironmentId, EnvId,
+    HttpDistributorClient, ResolveComponentRequest, TenantCtx, TenantId,
+};
 use greentic_flow::{
     add_step::{
         AddStepSpec, apply_and_validate,
@@ -31,6 +34,7 @@ use greentic_flow::{
     error::FlowError,
     flow_bundle::{FlowBundle, load_and_validate_bundle_with_schema_text},
     flow_ir::FlowIr,
+    flow_meta,
     json_output::LintJsonOutput,
     lint::{lint_builtin_rules, lint_with_registry},
     loader::{ensure_config_schema_path, load_ygtc_from_path, load_ygtc_from_str},
@@ -43,6 +47,7 @@ use greentic_flow::{
     resolve::resolve_parameters,
     resolve_summary::{remove_flow_resolve_summary_node, write_flow_resolve_summary_for_node},
     schema_mode::SchemaMode,
+    wizard_ops,
 };
 use greentic_types::flow_resolve::{
     ComponentSourceRefV1, FLOW_RESOLVE_SCHEMA_VERSION, FlowResolveV1, NodeResolveV1, ResolveModeV1,
@@ -189,15 +194,21 @@ struct AnswersArgs {
 
 #[derive(Args, Debug)]
 struct UpdateStepArgs {
+    /// Component id to resolve via wizard ops (preferred for new flows).
+    #[arg(value_name = "component_id")]
+    component_id: Option<String>,
     /// Flow file to update.
     #[arg(long = "flow")]
     flow_path: PathBuf,
-    /// Node id to update.
+    /// Node id to update (optional when component metadata exists).
     #[arg(long = "step")]
-    step: String,
+    step: Option<String>,
     /// Mode: default (default) or config.
     #[arg(long = "mode", default_value = "default", value_parser = ["config", "default"])]
     mode: String,
+    /// Optional wizard mode (default/setup/upgrade/remove).
+    #[arg(long = "wizard-mode", value_enum)]
+    wizard_mode: Option<WizardModeArg>,
     /// Optional new operation name (defaults to existing op key).
     #[arg(long = "operation")]
     operation: Option<String>,
@@ -225,9 +236,39 @@ struct UpdateStepArgs {
     /// Non-interactive mode (merge answers/prefill; fail if required missing).
     #[arg(long = "non-interactive")]
     non_interactive: bool,
+    /// Allow interactive QA prompts (wizard mode only).
+    #[arg(long = "interactive")]
+    interactive: bool,
     /// Optional component reference (oci://, repo://, store://).
     #[arg(long = "component")]
     component: Option<String>,
+    /// Local wasm path for wizard ops (relative to the flow file).
+    #[arg(long = "local-wasm")]
+    local_wasm: Option<PathBuf>,
+    /// Distributor URL for component-id resolution.
+    #[arg(long = "distributor-url")]
+    distributor_url: Option<String>,
+    /// Distributor auth token (optional).
+    #[arg(long = "auth-token")]
+    auth_token: Option<String>,
+    /// Tenant id for component-id resolution.
+    #[arg(long = "tenant")]
+    tenant: Option<String>,
+    /// Environment id for component-id resolution.
+    #[arg(long = "env")]
+    env: Option<String>,
+    /// Pack id for component-id resolution.
+    #[arg(long = "pack")]
+    pack: Option<String>,
+    /// Component version for component-id resolution.
+    #[arg(long = "component-version")]
+    component_version: Option<String>,
+    /// ABI version override for wizard ops.
+    #[arg(long = "abi-version")]
+    abi_version: Option<String>,
+    /// Resolver override (fixture://...) for tests/CI.
+    #[arg(long = "resolver")]
+    resolver: Option<String>,
     /// Show the updated flow without writing it.
     #[arg(long = "dry-run")]
     dry_run: bool,
@@ -238,12 +279,57 @@ struct UpdateStepArgs {
 
 #[derive(Args, Debug, Clone)]
 struct DeleteStepArgs {
+    /// Component id to resolve via wizard ops (preferred for new flows).
+    #[arg(value_name = "component_id")]
+    component_id: Option<String>,
     /// Flow file to update.
     #[arg(long = "flow")]
     flow_path: PathBuf,
-    /// Node id to delete.
+    /// Node id to delete (optional when component metadata exists).
     #[arg(long = "step")]
-    step: String,
+    step: Option<String>,
+    /// Optional wizard mode (default/setup/upgrade/remove).
+    #[arg(long = "wizard-mode", value_enum)]
+    wizard_mode: Option<WizardModeArg>,
+    /// Answers JSON/YAML string to merge with wizard prompts.
+    #[arg(long = "answers")]
+    answers: Option<String>,
+    /// Answers file (JSON/YAML).
+    #[arg(long = "answers-file")]
+    answers_file: Option<PathBuf>,
+    /// Allow interactive QA prompts (wizard mode only).
+    #[arg(long = "interactive")]
+    interactive: bool,
+    /// Optional component reference (oci://, repo://, store://).
+    #[arg(long = "component")]
+    component: Option<String>,
+    /// Local wasm path for wizard ops (relative to the flow file).
+    #[arg(long = "local-wasm")]
+    local_wasm: Option<PathBuf>,
+    /// Distributor URL for component-id resolution.
+    #[arg(long = "distributor-url")]
+    distributor_url: Option<String>,
+    /// Distributor auth token (optional).
+    #[arg(long = "auth-token")]
+    auth_token: Option<String>,
+    /// Tenant id for component-id resolution.
+    #[arg(long = "tenant")]
+    tenant: Option<String>,
+    /// Environment id for component-id resolution.
+    #[arg(long = "env")]
+    env: Option<String>,
+    /// Pack id for component-id resolution.
+    #[arg(long = "pack")]
+    pack: Option<String>,
+    /// Component version for component-id resolution.
+    #[arg(long = "component-version")]
+    component_version: Option<String>,
+    /// ABI version override for wizard ops.
+    #[arg(long = "abi-version")]
+    abi_version: Option<String>,
+    /// Resolver override (fixture://...) for tests/CI.
+    #[arg(long = "resolver")]
+    resolver: Option<String>,
     /// Strategy: splice (default) or remove-only.
     #[arg(long = "strategy", default_value = "splice", value_parser = ["splice", "remove-only"])]
     strategy: String,
@@ -358,6 +444,7 @@ fn handle_new(args: NewArgs) -> Result<()> {
         tags: Vec::new(),
         schema_version: Some(args.schema_version),
         entrypoints: IndexMap::new(),
+        meta: None,
         nodes: IndexMap::new(),
     };
     let mut yaml = serde_yaml_bw::to_string(&doc)?;
@@ -1145,13 +1232,6 @@ fn resolve_manifest_path_for_component(component: &str) -> Result<PathBuf> {
     )
 }
 
-fn component_name_from_manifest(manifest: &serde_json::Value) -> Option<String> {
-    manifest
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
 fn questions_for_operation(
     manifest: &serde_json::Value,
     operation: &str,
@@ -1267,8 +1347,30 @@ enum AddStepMode {
     Config,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum WizardModeArg {
+    Default,
+    Setup,
+    Upgrade,
+    Remove,
+}
+
+impl WizardModeArg {
+    fn to_mode(self) -> wizard_ops::WizardMode {
+        match self {
+            WizardModeArg::Default => wizard_ops::WizardMode::Default,
+            WizardModeArg::Setup => wizard_ops::WizardMode::Setup,
+            WizardModeArg::Upgrade => wizard_ops::WizardMode::Upgrade,
+            WizardModeArg::Remove => wizard_ops::WizardMode::Remove,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 struct AddStepArgs {
+    /// Component id to resolve via wizard ops (preferred for new flows).
+    #[arg(value_name = "component_id")]
+    component_id: Option<String>,
     /// Path to the flow file to modify.
     #[arg(long = "flow")]
     flow_path: PathBuf,
@@ -1281,6 +1383,9 @@ struct AddStepArgs {
     /// Optional pack alias for the new node.
     #[arg(long = "pack-alias")]
     pack_alias: Option<String>,
+    /// Optional wizard mode (default/setup/upgrade/remove).
+    #[arg(long = "wizard-mode", value_enum)]
+    wizard_mode: Option<WizardModeArg>,
     /// Optional operation for the new node.
     #[arg(long = "operation")]
     operation: Option<String>,
@@ -1314,6 +1419,9 @@ struct AddStepArgs {
     /// Answers file (JSON) for config mode.
     #[arg(long = "answers-file")]
     answers_file: Option<PathBuf>,
+    /// Allow interactive QA prompts (wizard mode only).
+    #[arg(long = "interactive")]
+    interactive: bool,
     /// Allow cycles/back-edges during insertion.
     #[arg(long = "allow-cycles")]
     allow_cycles: bool,
@@ -1329,8 +1437,8 @@ struct AddStepArgs {
     /// Optional component manifest paths for catalog validation or config flow discovery.
     #[arg(long = "manifest")]
     manifests: Vec<PathBuf>,
-    /// Required node id.
-    #[arg(long = "node-id", required = true)]
+    /// Optional node id override.
+    #[arg(long = "node-id")]
     node_id: Option<String>,
     /// Remote component reference (oci://, repo://, store://, etc.) for sidecar binding.
     #[arg(long = "component")]
@@ -1338,6 +1446,30 @@ struct AddStepArgs {
     /// Local wasm path for sidecar binding (relative to the flow file).
     #[arg(long = "local-wasm")]
     local_wasm: Option<PathBuf>,
+    /// Distributor URL for component-id resolution.
+    #[arg(long = "distributor-url")]
+    distributor_url: Option<String>,
+    /// Distributor auth token (optional).
+    #[arg(long = "auth-token")]
+    auth_token: Option<String>,
+    /// Tenant id for component-id resolution.
+    #[arg(long = "tenant")]
+    tenant: Option<String>,
+    /// Environment id for component-id resolution.
+    #[arg(long = "env")]
+    env: Option<String>,
+    /// Pack id for component-id resolution.
+    #[arg(long = "pack")]
+    pack: Option<String>,
+    /// Component version for component-id resolution.
+    #[arg(long = "component-version")]
+    component_version: Option<String>,
+    /// ABI version override for wizard ops.
+    #[arg(long = "abi-version")]
+    abi_version: Option<String>,
+    /// Resolver override (fixture://...) for tests/CI.
+    #[arg(long = "resolver")]
+    resolver: Option<String>,
     /// Pin the component (resolve tag to digest or hash local wasm).
     #[arg(long = "pin")]
     pin: bool,
@@ -1473,8 +1605,188 @@ fn infer_node_id_hint(args: &AddStepArgs) -> Option<String> {
     None
 }
 
+fn resolve_step_id(
+    step: Option<String>,
+    component_id: Option<&String>,
+    meta: &Option<serde_json::Value>,
+) -> Result<String> {
+    if let Some(step) = step {
+        return Ok(step);
+    }
+    if let Some(component_id) = component_id {
+        return flow_meta::find_node_for_component(meta, component_id);
+    }
+    anyhow::bail!("--step or component_id is required")
+}
+
 fn handle_add_step(args: AddStepArgs, schema_mode: SchemaMode) -> Result<()> {
     let (routing_value, require_placeholder) = build_routing_value(&args)?;
+    let component_identity = args
+        .component_id
+        .clone()
+        .or_else(|| args.component_ref.clone())
+        .or_else(|| {
+            args.local_wasm
+                .as_ref()
+                .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "component".to_string());
+
+    let wizard_requested = args.component_id.is_some() || args.wizard_mode.is_some();
+    if wizard_requested {
+        let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
+        let doc = load_ygtc_from_path(&args.flow_path)?;
+        let flow_ir = FlowIr::from_doc(doc)?;
+        let resolved = resolve_wizard_component(
+            &args.flow_path,
+            args.local_wasm.as_ref(),
+            args.component_ref.as_ref(),
+            args.component_id.as_ref(),
+            args.resolver.as_ref(),
+            args.distributor_url.as_ref(),
+            args.auth_token.as_ref(),
+            args.tenant.as_ref(),
+            args.env.as_ref(),
+            args.pack.as_ref(),
+            args.component_version.as_ref(),
+        )?;
+        let wizard_mode = args.wizard_mode.unwrap_or(WizardModeArg::Default).to_mode();
+        let spec = if let Some(fixture) = resolved.fixture.as_ref() {
+            wizard_ops::WizardSpecOutput {
+                abi: fixture.abi,
+                describe_cbor: fixture.describe_cbor.clone(),
+                qa_spec_cbor: fixture.qa_spec_cbor.clone(),
+            }
+        } else {
+            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)?
+        };
+        let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
+
+        let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
+        wizard_ops::merge_default_answers(&qa_spec, &mut answers);
+        let questions = wizard_ops::qa_spec_to_questions(&qa_spec);
+        if !questions.is_empty() {
+            warn_unknown_keys(&answers, &questions);
+            println!(
+                "{}",
+                wizard_header(&component_identity, wizard_mode.as_str())
+            );
+            if args.interactive {
+                answers = run_interactive_with_seed(&questions, answers)?;
+            } else {
+                validate_required(&questions, &answers)?;
+            }
+        }
+
+        let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
+        let current_config = wizard_ops::empty_cbor_map();
+        let config_cbor = if let Some(fixture) = resolved.fixture.as_ref() {
+            fixture.apply_answers_cbor.clone()
+        } else {
+            wizard_ops::apply_wizard_answers(
+                &resolved.wasm_bytes,
+                spec.abi,
+                wizard_mode,
+                &current_config,
+                &answers_cbor,
+            )?
+        };
+        let config_json = wizard_ops::cbor_to_json(&config_cbor)?;
+
+        let operation = args.operation.clone().unwrap_or_else(|| "run".to_string());
+        let routing_json = routing_value
+            .clone()
+            .unwrap_or(serde_json::Value::Array(Vec::new()));
+        let component_id_label = component_identity.clone();
+        let node_value = json!({
+            "component.exec": {
+                "component": component_id_label,
+                "config": config_json
+            },
+            "operation": operation,
+            "routing": routing_json
+        });
+
+        let mut node_id_hint =
+            infer_node_id_hint(&args).or_else(|| Some(component_identity.clone()));
+        if args.node_id.is_none() {
+            node_id_hint = normalize_node_id_hint(node_id_hint, &node_value);
+        }
+
+        let spec_plan = AddStepSpec {
+            after: args.after.clone(),
+            node_id_hint,
+            node: node_value,
+            allow_cycles: args.allow_cycles,
+            require_placeholder,
+        };
+
+        let empty_paths: Vec<PathBuf> = Vec::new();
+        let empty_catalog = ManifestCatalog::load_from_paths(&empty_paths);
+        let plan = plan_add_step(&flow_ir, spec_plan, &empty_catalog)
+            .map_err(|diags| anyhow::anyhow!("planning failed: {:?}", diags))?;
+        let inserted_id = plan.new_node.id.clone();
+        let mut updated = apply_and_validate(&flow_ir, plan, &empty_catalog, args.allow_cycles)?;
+
+        let abi_version = args
+            .abi_version
+            .clone()
+            .unwrap_or_else(|| wizard_ops::abi_version_from_abi(spec.abi));
+        flow_meta::set_component_entry(
+            &mut updated.meta,
+            &inserted_id,
+            &component_identity,
+            &abi_version,
+            resolved.digest.as_deref(),
+            &wizard_ops::describe_exports_for_meta(spec.abi),
+        );
+        flow_meta::ensure_hints_empty(&mut updated.meta, &inserted_id);
+
+        let updated_doc = updated.to_doc()?;
+        let mut output = serde_yaml_bw::to_string(&updated_doc)?;
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+
+        if args.validate_only {
+            println!("add-step validation succeeded");
+            return Ok(());
+        }
+
+        if !args.dry_run {
+            let tmp_path = args.flow_path.with_extension("ygtc.tmp");
+            fs::write(&tmp_path, &output)
+                .with_context(|| format!("write {}", tmp_path.display()))?;
+            fs::rename(&tmp_path, &args.flow_path)
+                .with_context(|| format!("replace {}", args.flow_path.display()))?;
+            sidecar.nodes.insert(
+                inserted_id.clone(),
+                NodeResolveV1 {
+                    source: resolved.source,
+                    mode: None,
+                },
+            );
+            write_sidecar(&sidecar_path, &sidecar)?;
+            if let Err(err) =
+                write_flow_resolve_summary_for_node(&args.flow_path, &inserted_id, &sidecar)
+                    .with_context(|| {
+                        format!("update resolve summary for {}", args.flow_path.display())
+                    })
+            {
+                eprintln!("warning: {err}");
+            }
+            println!(
+                "Inserted node after '{}' and wrote {}",
+                args.after.unwrap_or_else(|| "<default anchor>".to_string()),
+                args.flow_path.display()
+            );
+        } else {
+            print!("{output}");
+        }
+
+        return Ok(());
+    }
     let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
     let (component_source, resolve_mode) = resolve_component_source_inputs(
         args.local_wasm.as_ref(),
@@ -1506,17 +1818,6 @@ fn handle_add_step(args: AddStepArgs, schema_mode: SchemaMode) -> Result<()> {
 
     let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
     let has_answer_inputs = args.answers.is_some() || args.answers_file.is_some();
-    let mut component_label = args
-        .component_ref
-        .clone()
-        .or_else(|| {
-            args.local_wasm
-                .as_ref()
-                .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "component".to_string());
-
     let (mode_input, require_placeholder_flag) = match args.mode {
         AddStepMode::Default => {
             let mut payload_json: serde_json::Value =
@@ -1524,14 +1825,10 @@ fn handle_add_step(args: AddStepArgs, schema_mode: SchemaMode) -> Result<()> {
             let mut used_writes = false;
             let mut used_dev_flow = false;
             if let Some(manifest_path) = &manifest_path_for_schema {
-                let manifest = load_manifest_json(manifest_path)?;
-                if let Some(name) = component_name_from_manifest(&manifest) {
-                    component_label = name;
-                }
                 let questions = questions_from_manifest(manifest_path, "default")?;
                 if !questions.is_empty() {
                     warn_unknown_keys(&answers, &questions);
-                    println!("{}", wizard_header(&component_label, "default"));
+                    println!("{}", wizard_header(&component_identity, "default"));
                     if has_answer_inputs {
                         validate_required(&questions, &answers)?;
                     } else {
@@ -1579,16 +1876,10 @@ fn handle_add_step(args: AddStepArgs, schema_mode: SchemaMode) -> Result<()> {
         AddStepMode::Config => {
             let (config_flow, schema_path) =
                 resolve_config_flow(args.config_flow.clone(), &manifest_paths, "custom")?;
-            if let Some(path) = manifest_paths.first().cloned()
-                && let Ok(manifest) = load_manifest_json(&path)
-                && let Some(name) = component_name_from_manifest(&manifest)
-            {
-                component_label = name;
-            }
             let questions = questions_from_config_flow_text(&config_flow)?;
             if !questions.is_empty() {
                 warn_unknown_keys(&answers, &questions);
-                println!("{}", wizard_header(&component_label, "config"));
+                println!("{}", wizard_header(&component_identity, "config"));
                 if has_answer_inputs {
                     validate_required(&questions, &answers)?;
                 } else {
@@ -1603,7 +1894,7 @@ fn handle_add_step(args: AddStepArgs, schema_mode: SchemaMode) -> Result<()> {
                     config_flow,
                     schema_path: schema_path.into_boxed_path(),
                     answers: answers_to_json_map(answers),
-                    manifest_id: Some(component_label.clone()),
+                    manifest_id: Some(component_identity.clone()),
                     manifest_path: manifest_path_for_validation,
                 },
                 true,
@@ -1675,30 +1966,154 @@ fn handle_add_step(args: AddStepArgs, schema_mode: SchemaMode) -> Result<()> {
 }
 
 fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<()> {
+    let doc = load_ygtc_from_path(&args.flow_path)?;
+    let mut flow_ir = FlowIr::from_doc(doc)?;
+    let component_identity = args
+        .component_id
+        .clone()
+        .or_else(|| args.component.clone())
+        .or_else(|| {
+            args.local_wasm
+                .as_ref()
+                .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "component".to_string());
+    let step_id = resolve_step_id(args.step.clone(), args.component_id.as_ref(), &flow_ir.meta)?;
+    let wizard_requested = args.component_id.is_some() || args.wizard_mode.is_some();
+    if wizard_requested {
+        let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
+        let resolved = resolve_wizard_component(
+            &args.flow_path,
+            args.local_wasm.as_ref(),
+            args.component.as_ref(),
+            args.component_id.as_ref(),
+            args.resolver.as_ref(),
+            args.distributor_url.as_ref(),
+            args.auth_token.as_ref(),
+            args.tenant.as_ref(),
+            args.env.as_ref(),
+            args.pack.as_ref(),
+            args.component_version.as_ref(),
+        )?;
+        let wizard_mode = args.wizard_mode.unwrap_or(WizardModeArg::Upgrade).to_mode();
+        let spec = if let Some(fixture) = resolved.fixture.as_ref() {
+            wizard_ops::WizardSpecOutput {
+                abi: fixture.abi,
+                describe_cbor: fixture.describe_cbor.clone(),
+                qa_spec_cbor: fixture.qa_spec_cbor.clone(),
+            }
+        } else {
+            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)?
+        };
+        let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
+
+        let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
+        wizard_ops::merge_default_answers(&qa_spec, &mut answers);
+        let questions = wizard_ops::qa_spec_to_questions(&qa_spec);
+        if !questions.is_empty() {
+            warn_unknown_keys(&answers, &questions);
+            println!(
+                "{}",
+                wizard_header(&component_identity, wizard_mode.as_str())
+            );
+            if args.interactive {
+                answers = run_interactive_with_seed(&questions, answers)?;
+            } else {
+                validate_required(&questions, &answers)?;
+            }
+        }
+
+        let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
+        let mut node = flow_ir
+            .nodes
+            .get(&step_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("step '{}' not found", step_id))?;
+        let current_config = wizard_ops::json_to_cbor(&node.payload)?;
+        let config_cbor = if let Some(fixture) = resolved.fixture.as_ref() {
+            fixture.apply_answers_cbor.clone()
+        } else {
+            wizard_ops::apply_wizard_answers(
+                &resolved.wasm_bytes,
+                spec.abi,
+                wizard_mode,
+                &current_config,
+                &answers_cbor,
+            )?
+        };
+        let config_json = wizard_ops::cbor_to_json(&config_cbor)?;
+        node.payload = config_json;
+        if let Some(op) = args.operation.clone() {
+            node.operation = op;
+        }
+        if let Some(routing) = build_update_routing(&args)? {
+            node.routing = routing;
+        }
+        flow_ir.nodes.insert(step_id.clone(), node);
+
+        let abi_version = args
+            .abi_version
+            .clone()
+            .unwrap_or_else(|| wizard_ops::abi_version_from_abi(spec.abi));
+        flow_meta::set_component_entry(
+            &mut flow_ir.meta,
+            &step_id,
+            &component_identity,
+            &abi_version,
+            resolved.digest.as_deref(),
+            &wizard_ops::describe_exports_for_meta(spec.abi),
+        );
+        flow_meta::ensure_hints_empty(&mut flow_ir.meta, &step_id);
+
+        let doc_out = flow_ir.to_doc()?;
+        let yaml = serialize_doc(&doc_out)?;
+        load_ygtc_from_str(&yaml)?;
+        if !args.dry_run {
+            write_flow_file(&args.flow_path, &yaml, true)?;
+            sidecar.nodes.insert(
+                step_id.clone(),
+                NodeResolveV1 {
+                    source: resolved.source,
+                    mode: None,
+                },
+            );
+            write_sidecar(&sidecar_path, &sidecar)?;
+            if let Err(err) =
+                write_flow_resolve_summary_for_node(&args.flow_path, &step_id, &sidecar)
+                    .with_context(|| {
+                        format!("update resolve summary for {}", args.flow_path.display())
+                    })
+            {
+                eprintln!("warning: {err}");
+            }
+            println!("Updated step '{}' in {}", step_id, args.flow_path.display());
+        } else {
+            print!("{yaml}");
+        }
+        return Ok(());
+    }
     let (_sidecar_path, sidecar) = ensure_sidecar(&args.flow_path)?;
     if let Some(component) = args.component.as_deref() {
         validate_component_ref(component)?;
     }
-    let sidecar_entry = sidecar.nodes.get(&args.step).ok_or_else(|| {
+    let sidecar_entry = sidecar.nodes.get(&step_id).ok_or_else(|| {
         anyhow::anyhow!(
             "no sidecar mapping for node '{}'; run greentic-flow bind-component or re-add the step with --component/--local-wasm",
-            args.step
+            step_id
         )
     })?;
     let component_payload = load_component_payload(&sidecar_entry.source, &args.flow_path)?;
-    let doc = load_ygtc_from_path(&args.flow_path)?;
-    let mut flow_ir = FlowIr::from_doc(doc)?;
     let mut node = flow_ir
         .nodes
-        .get(&args.step)
+        .get(&step_id)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("step '{}' not found", args.step))?;
+        .ok_or_else(|| anyhow::anyhow!("step '{}' not found", step_id))?;
     let mut merged_payload = node.payload.clone();
     if let Some(component_defaults) = component_payload {
         merged_payload = merge_payload(merged_payload, Some(component_defaults));
     }
     let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
-    let mut component_label = "component".to_string();
     let mut new_operation = args
         .operation
         .clone()
@@ -1706,10 +2121,6 @@ fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<(
     let new_payload = if args.mode == "config" {
         let manifest_path =
             resolve_component_manifest_path(&sidecar_entry.source, &args.flow_path)?;
-        let manifest = load_manifest_json(&manifest_path)?;
-        if let Some(name) = component_name_from_manifest(&manifest) {
-            component_label = name;
-        }
         let (config_flow, schema_path) =
             resolve_config_flow(None, std::slice::from_ref(&manifest_path), "custom")?;
         let mut base_answers = QuestionAnswers::new();
@@ -1720,7 +2131,7 @@ fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<(
         let questions = questions_from_config_flow_text(&config_flow)?;
         if !questions.is_empty() {
             warn_unknown_keys(&answers, &questions);
-            println!("{}", wizard_header(&component_label, "config"));
+            println!("{}", wizard_header(&component_identity, "config"));
             if args.non_interactive {
                 validate_required(&questions, &base_answers)?;
             } else {
@@ -1732,7 +2143,7 @@ fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<(
         if questions.is_empty() {
             require_schema(
                 schema_mode,
-                &component_label,
+                &component_identity,
                 flow_name,
                 &manifest_path,
                 &source_desc,
@@ -1742,7 +2153,7 @@ fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<(
             let dev_schema = schema_for_questions(&questions);
             require_schema(
                 schema_mode,
-                &component_label,
+                &component_identity,
                 flow_name,
                 &manifest_path,
                 &source_desc,
@@ -1754,7 +2165,7 @@ fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<(
             &config_flow,
             &schema_path,
             &answers_map,
-            Some(component_label.clone()),
+            Some(component_identity.clone()),
         )?;
         let normalized = normalize_node_map(output.node)?;
         if args.operation.is_none() {
@@ -1769,16 +2180,12 @@ fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<(
             resolve_component_manifest_path(&sidecar_entry.source, &args.flow_path)
         {
             manifest_path_for_validation = Some(manifest_path.clone());
-            let manifest = load_manifest_json(&manifest_path)?;
-            if let Some(name) = component_name_from_manifest(&manifest) {
-                component_label = name;
-            }
             let questions = questions_from_manifest(&manifest_path, "default")?;
             if !questions.is_empty() {
                 let mut base_answers = extract_answers_from_payload(&questions, &payload);
                 warn_unknown_keys(&answers, &questions);
                 base_answers.extend(answers.clone());
-                println!("{}", wizard_header(&component_label, "default"));
+                println!("{}", wizard_header(&component_identity, "default"));
                 if args.non_interactive {
                     validate_required(&questions, &base_answers)?;
                 } else {
@@ -1823,7 +2230,7 @@ fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<(
     node.operation = new_operation;
     node.payload = new_payload;
     node.routing = new_routing;
-    flow_ir.nodes.insert(args.step.clone(), node);
+    flow_ir.nodes.insert(step_id.clone(), node);
 
     let doc_out = flow_ir.to_doc()?;
     // Adjust entrypoint if it targeted the removed node in other ops; here node stays, so no-op.
@@ -1831,16 +2238,12 @@ fn handle_update_step(args: UpdateStepArgs, schema_mode: SchemaMode) -> Result<(
     load_ygtc_from_str(&yaml)?; // schema validation
     if !args.dry_run {
         write_flow_file(&args.flow_path, &yaml, true)?;
-        if let Err(err) = write_flow_resolve_summary_for_node(&args.flow_path, &args.step, &sidecar)
+        if let Err(err) = write_flow_resolve_summary_for_node(&args.flow_path, &step_id, &sidecar)
             .with_context(|| format!("update resolve summary for {}", args.flow_path.display()))
         {
             eprintln!("warning: {err}");
         }
-        println!(
-            "Updated step '{}' in {}",
-            args.step,
-            args.flow_path.display()
-        );
+        println!("Updated step '{}' in {}", step_id, args.flow_path.display());
     } else {
         print!("{yaml}");
     }
@@ -1851,7 +2254,82 @@ fn handle_delete_step(args: DeleteStepArgs) -> Result<()> {
     let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
     let doc = load_ygtc_from_path(&args.flow_path)?;
     let mut flow_ir = FlowIr::from_doc(doc)?;
-    let target = args.step.clone();
+    let component_identity = args
+        .component_id
+        .clone()
+        .or_else(|| args.component.clone())
+        .or_else(|| {
+            args.local_wasm
+                .as_ref()
+                .and_then(|p| p.file_stem().and_then(|s| s.to_str()))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "component".to_string());
+    let target = resolve_step_id(args.step.clone(), args.component_id.as_ref(), &flow_ir.meta)?;
+    let wizard_requested = args.component_id.is_some() || args.wizard_mode.is_some();
+    if wizard_requested {
+        let resolved = resolve_wizard_component(
+            &args.flow_path,
+            args.local_wasm.as_ref(),
+            args.component.as_ref(),
+            args.component_id.as_ref(),
+            args.resolver.as_ref(),
+            args.distributor_url.as_ref(),
+            args.auth_token.as_ref(),
+            args.tenant.as_ref(),
+            args.env.as_ref(),
+            args.pack.as_ref(),
+            args.component_version.as_ref(),
+        )?;
+        let wizard_mode = args.wizard_mode.unwrap_or(WizardModeArg::Remove).to_mode();
+        let spec = if let Some(fixture) = resolved.fixture.as_ref() {
+            wizard_ops::WizardSpecOutput {
+                abi: fixture.abi,
+                describe_cbor: fixture.describe_cbor.clone(),
+                qa_spec_cbor: fixture.qa_spec_cbor.clone(),
+            }
+        } else {
+            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)?
+        };
+        let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
+
+        let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
+        wizard_ops::merge_default_answers(&qa_spec, &mut answers);
+        let questions = wizard_ops::qa_spec_to_questions(&qa_spec);
+        if !questions.is_empty() {
+            warn_unknown_keys(&answers, &questions);
+            println!(
+                "{}",
+                wizard_header(&component_identity, wizard_mode.as_str())
+            );
+            if args.interactive {
+                answers = run_interactive_with_seed(&questions, answers)?;
+            } else {
+                validate_required(&questions, &answers)?;
+            }
+        }
+
+        let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
+        let target_node = flow_ir
+            .nodes
+            .get(&target)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("step '{}' not found", target))?;
+        let current_config = wizard_ops::json_to_cbor(&target_node.payload)?;
+        if let Some(fixture) = resolved.fixture.as_ref() {
+            let _ = fixture.apply_answers_cbor.clone();
+        } else {
+            let _ = wizard_ops::apply_wizard_answers(
+                &resolved.wasm_bytes,
+                spec.abi,
+                wizard_mode,
+                &current_config,
+                &answers_cbor,
+            )?;
+        }
+        flow_meta::clear_component_entry(&mut flow_ir.meta, &target);
+    }
+
     let target_node = flow_ir
         .nodes
         .get(&target)
@@ -1904,6 +2382,7 @@ fn handle_delete_step(args: DeleteStepArgs) -> Result<()> {
     }
 
     flow_ir.nodes.swap_remove(&target);
+    flow_meta::clear_component_entry(&mut flow_ir.meta, &target);
     // Fix entrypoint if it pointed to deleted node.
     let mut new_entrypoints = flow_ir.entrypoints.clone();
     for (_, v) in new_entrypoints.iter_mut() {
@@ -2406,6 +2885,302 @@ fn resolve_component_source_inputs(
     }
 
     anyhow::bail!("component source is required; provide --component <ref> or --local-wasm <path>");
+}
+
+struct WizardComponentResolution {
+    wasm_bytes: Vec<u8>,
+    digest: Option<String>,
+    source: ComponentSourceRefV1,
+    fixture: Option<WizardFixture>,
+}
+
+struct WizardFixture {
+    abi: wizard_ops::WizardAbi,
+    describe_cbor: Vec<u8>,
+    qa_spec_cbor: Vec<u8>,
+    apply_answers_cbor: Vec<u8>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_wizard_component(
+    flow_path: &Path,
+    local_wasm: Option<&PathBuf>,
+    component_ref: Option<&String>,
+    component_id: Option<&String>,
+    resolver: Option<&String>,
+    distributor_url: Option<&String>,
+    auth_token: Option<&String>,
+    tenant: Option<&String>,
+    env: Option<&String>,
+    pack: Option<&String>,
+    component_version: Option<&String>,
+) -> Result<WizardComponentResolution> {
+    if let Some(local) = local_wasm {
+        let (abs_path, uri_path) = normalize_local_wasm_path(local, flow_path)?;
+        let bytes =
+            fs::read(&abs_path).with_context(|| format!("read wasm at {}", abs_path.display()))?;
+        let digest = Some(compute_local_digest(&abs_path)?);
+        let source = ComponentSourceRefV1::Local {
+            path: uri_path,
+            digest: digest.clone(),
+        };
+        return Ok(WizardComponentResolution {
+            wasm_bytes: bytes,
+            digest,
+            source,
+            fixture: None,
+        });
+    }
+
+    if let Some(reference) = component_ref {
+        if let Some(fixture) = resolve_fixture_wizard(reference, resolver)? {
+            let source = classify_remote_source(reference, None);
+            return Ok(WizardComponentResolution {
+                wasm_bytes: Vec::new(),
+                digest: None,
+                source,
+                fixture: Some(fixture),
+            });
+        }
+        let resolved = resolve_ref_to_bytes(reference, resolver)?;
+        let source = classify_remote_source(reference, resolved.digest.clone());
+        return Ok(WizardComponentResolution {
+            wasm_bytes: resolved.bytes,
+            digest: resolved.digest,
+            source,
+            fixture: None,
+        });
+    }
+
+    if let Some(component_id) = component_id {
+        let reference = resolve_component_id_reference(
+            component_id,
+            distributor_url,
+            auth_token,
+            tenant,
+            env,
+            pack,
+            component_version,
+        )?;
+        if let Some(fixture) = resolve_fixture_wizard(&reference, resolver)? {
+            let source = if reference.starts_with("file://") {
+                let local_path = reference.trim_start_matches("file://");
+                let path = PathBuf::from(local_path);
+                let (_abs_path, uri_path) = normalize_local_wasm_path(&path, flow_path)?;
+                ComponentSourceRefV1::Local {
+                    path: uri_path,
+                    digest: None,
+                }
+            } else {
+                classify_remote_source(&reference, None)
+            };
+            return Ok(WizardComponentResolution {
+                wasm_bytes: Vec::new(),
+                digest: None,
+                source,
+                fixture: Some(fixture),
+            });
+        }
+        let resolved = resolve_ref_to_bytes(&reference, resolver)?;
+        let source = if reference.starts_with("file://") {
+            let local_path = reference.trim_start_matches("file://");
+            let path = PathBuf::from(local_path);
+            let (abs_path, uri_path) = normalize_local_wasm_path(&path, flow_path)?;
+            let digest = Some(compute_local_digest(&abs_path)?);
+            ComponentSourceRefV1::Local {
+                path: uri_path,
+                digest,
+            }
+        } else {
+            classify_remote_source(&reference, resolved.digest.clone())
+        };
+        return Ok(WizardComponentResolution {
+            wasm_bytes: resolved.bytes,
+            digest: resolved.digest,
+            source,
+            fixture: None,
+        });
+    }
+
+    anyhow::bail!(
+        "component source is required; provide --local-wasm, --component <ref>, or component_id"
+    );
+}
+
+struct ResolvedRefBytes {
+    bytes: Vec<u8>,
+    digest: Option<String>,
+}
+
+fn fixture_key(reference: &str) -> String {
+    reference
+        .trim_start_matches("oci://")
+        .trim_start_matches("repo://")
+        .trim_start_matches("store://")
+        .trim_start_matches("file://")
+        .replace(['/', ':', '@'], "_")
+}
+
+fn resolve_ref_to_bytes(reference: &str, resolver: Option<&String>) -> Result<ResolvedRefBytes> {
+    if let Some(resolver) = resolver
+        && let Some(root) = resolver.strip_prefix("fixture://")
+    {
+        return resolve_fixture_bytes(reference, Path::new(root));
+    }
+
+    let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    let client = DistClient::new(Default::default());
+    let resolved = rt
+        .block_on(client.resolve_ref(reference))
+        .map_err(|e| anyhow::anyhow!("resolve reference {reference}: {e}"))?;
+    let path = resolved
+        .cache_path
+        .ok_or_else(|| anyhow::anyhow!("resolved reference {reference} without cache path"))?;
+    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    Ok(ResolvedRefBytes {
+        bytes,
+        digest: Some(resolved.digest),
+    })
+}
+
+fn resolve_fixture_bytes(reference: &str, root: &Path) -> Result<ResolvedRefBytes> {
+    let key = fixture_key(reference);
+    let direct = root.join(format!("{key}.wasm"));
+    let nested = root.join(&key).join("component.wasm");
+    let path = if direct.exists() { &direct } else { &nested };
+    if !path.exists() {
+        anyhow::bail!(
+            "fixture resolver missing {} (looked for {} or {})",
+            reference,
+            direct.display(),
+            nested.display()
+        );
+    }
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let digest = Some(compute_local_digest(path)?);
+    Ok(ResolvedRefBytes { bytes, digest })
+}
+
+fn resolve_fixture_wizard(
+    reference: &str,
+    resolver: Option<&String>,
+) -> Result<Option<WizardFixture>> {
+    let Some(resolver) = resolver else {
+        return Ok(None);
+    };
+    let Some(root) = resolver.strip_prefix("fixture://") else {
+        return Ok(None);
+    };
+    let root = Path::new(root);
+    let key = fixture_key(reference);
+    let qa_spec_path = root.join(format!("{key}.qa-spec.cbor"));
+    let apply_path = root.join(format!("{key}.apply-answers.cbor"));
+    let describe_path = root.join(format!("{key}.describe.cbor"));
+    let abi_path = root.join(format!("{key}.abi"));
+
+    if !qa_spec_path.exists()
+        && !apply_path.exists()
+        && !describe_path.exists()
+        && !abi_path.exists()
+    {
+        return Ok(None);
+    }
+    if !qa_spec_path.exists() || !apply_path.exists() {
+        anyhow::bail!(
+            "fixture wizard missing qa-spec/apply-answers for {} (expected {} and {})",
+            reference,
+            qa_spec_path.display(),
+            apply_path.display()
+        );
+    }
+    let qa_spec_cbor =
+        fs::read(&qa_spec_path).with_context(|| format!("read {}", qa_spec_path.display()))?;
+    let apply_answers_cbor =
+        fs::read(&apply_path).with_context(|| format!("read {}", apply_path.display()))?;
+    let describe_cbor = if describe_path.exists() {
+        fs::read(&describe_path).with_context(|| format!("read {}", describe_path.display()))?
+    } else {
+        Vec::new()
+    };
+    let abi = if abi_path.exists() {
+        let text = fs::read_to_string(&abi_path)
+            .with_context(|| format!("read {}", abi_path.display()))?;
+        match text.trim() {
+            "0.5.0" => wizard_ops::WizardAbi::Legacy,
+            _ => wizard_ops::WizardAbi::V6,
+        }
+    } else {
+        wizard_ops::WizardAbi::V6
+    };
+
+    Ok(Some(WizardFixture {
+        abi,
+        describe_cbor,
+        qa_spec_cbor,
+        apply_answers_cbor,
+    }))
+}
+
+fn resolve_component_id_reference(
+    component_id: &str,
+    distributor_url: Option<&String>,
+    auth_token: Option<&String>,
+    tenant: Option<&String>,
+    env: Option<&String>,
+    pack: Option<&String>,
+    component_version: Option<&String>,
+) -> Result<String> {
+    let base_url = distributor_url.ok_or_else(|| {
+        anyhow::anyhow!("--distributor-url is required for component_id resolution")
+    })?;
+    let tenant = tenant
+        .ok_or_else(|| anyhow::anyhow!("--tenant is required for component_id resolution"))?;
+    let env =
+        env.ok_or_else(|| anyhow::anyhow!("--env is required for component_id resolution"))?;
+    let pack =
+        pack.ok_or_else(|| anyhow::anyhow!("--pack is required for component_id resolution"))?;
+    let version = component_version.ok_or_else(|| {
+        anyhow::anyhow!("--component-version is required for component_id resolution")
+    })?;
+
+    let cfg = DistributorClientConfig {
+        base_url: Some(base_url.to_string()),
+        environment_id: DistributorEnvironmentId::from(env.as_str()),
+        tenant: TenantCtx::new(
+            EnvId::try_from(env.as_str()).map_err(|e| anyhow::anyhow!("env id: {e}"))?,
+            TenantId::try_from(tenant.as_str()).map_err(|e| anyhow::anyhow!("tenant id: {e}"))?,
+        ),
+        auth_token: auth_token.cloned(),
+        extra_headers: None,
+        request_timeout: None,
+    };
+    let client = HttpDistributorClient::new(cfg)
+        .map_err(|err| anyhow::anyhow!("init distributor client: {err}"))?;
+    let rt = tokio::runtime::Runtime::new().context("create tokio runtime")?;
+    let resp = rt
+        .block_on(
+            client.resolve_component(ResolveComponentRequest {
+                tenant: TenantCtx::new(
+                    EnvId::try_from(env.as_str()).map_err(|e| anyhow::anyhow!("env id: {e}"))?,
+                    TenantId::try_from(tenant.as_str())
+                        .map_err(|e| anyhow::anyhow!("tenant id: {e}"))?,
+                ),
+                environment_id: DistributorEnvironmentId::from(env.as_str()),
+                pack_id: pack.to_string(),
+                component_id: component_id.to_string(),
+                version: version.to_string(),
+                extra: serde_json::Value::Object(Default::default()),
+            }),
+        )
+        .map_err(|err| anyhow::anyhow!("resolve component via distributor: {err}"))?;
+
+    match resp.artifact {
+        greentic_types::ArtifactLocation::FilePath { path } => Ok(format!("file://{path}")),
+        greentic_types::ArtifactLocation::OciReference { reference } => Ok(reference),
+        greentic_types::ArtifactLocation::DistributorInternal { handle } => Err(anyhow!(
+            "distributor returned internal handle {handle}; cannot resolve artifact"
+        )),
+    }
 }
 
 fn ensure_sidecar_source_available(source: &ComponentSourceRefV1, flow_path: &Path) -> Result<()> {

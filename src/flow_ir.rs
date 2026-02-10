@@ -13,9 +13,15 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct FlowIr {
     pub id: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
     pub kind: String,
+    pub start: Option<String>,
+    pub parameters: Value,
+    pub tags: Vec<String>,
     pub schema_version: Option<u32>,
     pub entrypoints: IndexMap<String, String>,
+    pub meta: Option<Value>,
     pub nodes: IndexMap<String, NodeIr>,
 }
 
@@ -76,9 +82,15 @@ impl FlowIr {
 
         Ok(FlowIr {
             id: doc.id,
+            title: doc.title,
+            description: doc.description,
             kind: doc.flow_type,
+            start: doc.start,
+            parameters: doc.parameters,
+            tags: doc.tags,
             schema_version,
             entrypoints,
+            meta: doc.meta,
             nodes,
         })
     }
@@ -134,16 +146,31 @@ impl FlowIr {
             );
         }
 
+        let mut entrypoints = IndexMap::new();
+        for (name, target) in &self.entrypoints {
+            if name == "default" {
+                continue;
+            }
+            entrypoints.insert(name.clone(), Value::String(target.clone()));
+        }
+
+        let start = self
+            .entrypoints
+            .get("default")
+            .cloned()
+            .or_else(|| self.start.clone());
+
         Ok(FlowDoc {
             id: self.id.clone(),
-            title: None,
-            description: None,
+            title: self.title.clone(),
+            description: self.description.clone(),
             flow_type: self.kind.clone(),
-            start: self.entrypoints.get("default").cloned(),
-            parameters: Value::Object(Map::new()),
-            tags: Vec::new(),
+            start,
+            parameters: self.parameters.clone(),
+            tags: self.tags.clone(),
             schema_version: self.schema_version,
-            entrypoints: IndexMap::new(),
+            entrypoints,
+            meta: self.meta.clone(),
             nodes,
         })
     }

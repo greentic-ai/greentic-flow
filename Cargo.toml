@@ -1,6 +1,6 @@
 [package]
 name = "greentic-flow"
-version = "0.4.38"
+version = "0.4.39"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -19,8 +19,9 @@ greentic-types = { version = "0.4", features = ["telemetry-autoinit", "schema"] 
 serde = { version = "1", features = ["derive"] }
 serde_yaml_bw = "2"
 serde_json = "1"
+ciborium = "0.2"
 handlebars = "6"
-jsonschema = { version = "0.40"}
+jsonschema = { version = "0.41"}
 thiserror = "2"
 regex = "1"
 indexmap = { version = "2", features = ["serde"] }
@@ -32,8 +33,9 @@ blake3 = "1"
 pathdiff = "0.2"
 sha2 = "0.10"
 semver = "1"
-greentic-distributor-client = { version = "0.4", default-features = false, features = ["dist-client"] }
+greentic-distributor-client = { version = "0.4", default-features = false, features = ["dist-client", "http-runtime"] }
 url = "2"
+wasmtime = { version = "41", features = ["component-model"] }
 
 [dev-dependencies]
 assert_cmd = "2"

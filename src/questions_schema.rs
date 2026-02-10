@@ -108,6 +108,9 @@ fn schema_for_question(question: &Question) -> Value {
         QuestionKind::Int => {
             obj.insert("type".to_string(), Value::String("integer".to_string()));
         }
+        QuestionKind::Float => {
+            obj.insert("type".to_string(), Value::String("number".to_string()));
+        }
         QuestionKind::Choice => {
             if question.choices.is_empty() {
                 let schema_type = question
@@ -137,6 +140,9 @@ fn default_value_for_question(question: &Question) -> Value {
     match question.kind {
         QuestionKind::Bool => Value::Bool(false),
         QuestionKind::Int => Value::Number(0.into()),
+        QuestionKind::Float => {
+            Value::Number(serde_json::Number::from_f64(0.0).unwrap_or_else(|| 0.into()))
+        }
         QuestionKind::Choice => question
             .choices
             .first()

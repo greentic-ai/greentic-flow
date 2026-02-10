@@ -1,0 +1,14 @@
+package greentic:component-wizard@0.6.0;
+
+world component-wizard {
+  enum qa-mode {
+    default,
+    setup,
+    upgrade,
+    remove,
+  }
+
+  export describe: func() -> list<u8>;
+  export qa-spec: func(mode: qa-mode) -> list<u8>;
+  export apply-answers: func(mode: qa-mode, current-config: list<u8>, answers: list<u8>) -> list<u8>;
+}

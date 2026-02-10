@@ -1,10 +1,14 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::prelude::*;
 use greentic_flow::loader::load_ygtc_from_path;
+use greentic_types::cbor::canonical;
+use greentic_types::i18n_text::I18nText;
+use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QaMode};
 use predicates::prelude::PredicateBooleanExt;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 use serde_yaml_bw::Value;
+use std::collections::BTreeMap;
 use std::{fs, path::Path, process::Command};
 use tempfile::tempdir;
 
@@ -82,6 +86,90 @@ fn add_step_into_empty_flow_succeeds() {
     assert_eq!(
         node.get(Value::from("routing")).unwrap().as_str(),
         Some("out")
+    );
+}
+
+#[test]
+fn add_step_wizard_uses_fixture_resolver() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    Command::new(assert_cmd::cargo::cargo_bin!("greentic-flow"))
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .assert()
+        .success();
+
+    let fixture_dir = dir.path().join("fixtures");
+    fs::create_dir_all(&fixture_dir).unwrap();
+    let reference = "oci://acme/widget:1";
+    let key = reference
+        .trim_start_matches("oci://")
+        .trim_start_matches("repo://")
+        .trim_start_matches("store://")
+        .trim_start_matches("file://")
+        .replace(['/', ':', '@'], "_");
+
+    let spec = ComponentQaSpec {
+        mode: QaMode::Default,
+        title: I18nText::new("title", Some("Fixture Wizard".to_string())),
+        description: None,
+        questions: Vec::new(),
+        defaults: BTreeMap::new(),
+    };
+    let qa_spec_cbor = canonical::to_canonical_cbor(&spec).unwrap();
+    fs::write(
+        fixture_dir.join(format!("{key}.qa-spec.cbor")),
+        qa_spec_cbor,
+    )
+    .unwrap();
+    let config = json!({"foo":"bar"});
+    let apply_cbor = canonical::to_canonical_cbor(&config).unwrap();
+    fs::write(
+        fixture_dir.join(format!("{key}.apply-answers.cbor")),
+        apply_cbor,
+    )
+    .unwrap();
+    fs::write(fixture_dir.join(format!("{key}.describe.cbor")), []).unwrap();
+    fs::write(fixture_dir.join(format!("{key}.abi")), "0.6.0").unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .current_dir(dir.path())
+        .arg("add-step")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--node-id")
+        .arg("widget")
+        .arg("--component")
+        .arg(reference)
+        .arg("--wizard-mode")
+        .arg("default")
+        .arg("--routing-out")
+        .arg("--resolver")
+        .arg(format!("fixture://{}", fixture_dir.display()))
+        .assert()
+        .success();
+
+    let yaml = read_yaml(&flow_path);
+    let nodes = yaml.get("nodes").and_then(Value::as_mapping).unwrap();
+    let node = nodes.get(Value::from("widget")).unwrap();
+    let component_exec = node
+        .get(Value::from("run"))
+        .and_then(Value::as_mapping)
+        .unwrap();
+    assert_eq!(
+        component_exec
+            .get(Value::from("component"))
+            .and_then(Value::as_str),
+        Some(reference)
+    );
+    assert_eq!(
+        serde_json::to_value(component_exec.get(Value::from("config")).unwrap()).unwrap(),
+        json!({"foo":"bar"})
     );
 }
 

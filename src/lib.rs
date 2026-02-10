@@ -1,7 +1,7 @@
 //! Downstream runtimes must set the current tenant telemetry context via
 //! `greentic_types::telemetry::set_current_tenant_ctx` before executing flows
 //! (for example, prior to `FlowEngine::run` in the host runner).
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![allow(clippy::result_large_err)]
 
 pub mod add_step;
@@ -11,6 +11,7 @@ pub mod config_flow;
 pub mod error;
 pub mod flow_bundle;
 pub mod flow_ir;
+pub mod flow_meta;
 pub mod ir;
 pub mod json_output;
 pub mod lint;
@@ -26,6 +27,7 @@ pub mod schema_mode;
 pub mod splice;
 pub mod template;
 pub mod util;
+pub mod wizard_ops;
 
 pub use flow_bundle::{
     ComponentPin, FlowBundle, NodeRef, blake3_hex, canonicalize_json, extract_component_pins,
