@@ -55,7 +55,7 @@ use pathdiff::diff_paths;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 #[derive(Parser, Debug)]
-#[command(name = "greentic-flow", about = "Flow scaffolding helpers")]
+#[command(name = "greentic-flow", about = "Flow scaffolding helpers", version)]
 struct Cli {
     /// Enable permissive schema handling (default: strict).
     #[arg(long, global = true)]

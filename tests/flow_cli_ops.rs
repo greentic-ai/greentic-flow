@@ -2,6 +2,7 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use assert_cmd::prelude::*;
 use greentic_flow::loader::load_ygtc_from_path;
 use predicates::prelude::PredicateBooleanExt;
+use predicates::str::contains;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 use serde_yaml_bw::Value;
@@ -10,6 +11,16 @@ use tempfile::tempdir;
 
 fn read_yaml(path: &Path) -> Value {
     serde_yaml_bw::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn version_flag_prints_version() {
+    let expected = format!("greentic-flow {}", env!("CARGO_PKG_VERSION"));
+    cargo_bin_cmd!("greentic-flow")
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(contains(expected));
 }
 
 #[test]
