@@ -12,6 +12,13 @@ nodes:
 
 Routing shorthand (`routing: out|reply`) is accepted on read and emitted only when routing is exactly that terminal edge. Flows never embed component ids; sidecar entries track component sources.
 
+## Global flags
+
+```
+greentic-flow --version
+greentic-flow --help
+```
+
 ## Commands
 
 ### new

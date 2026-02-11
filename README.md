@@ -13,6 +13,12 @@ Human-friendly YGTc v2 flow authoring: create flows, add component steps, keep r
 - crates.io (no bundled binaries): `cargo install --locked greentic-flow`
 - Direct download: pick the `.tgz` for your target from the latest release and put `greentic-flow` on your `PATH`.
 
+Check the installed CLI version:
+
+```bash
+greentic-flow --version
+```
+
 ## Create your first flow
 
 ```bash

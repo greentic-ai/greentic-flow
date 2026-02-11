@@ -5,6 +5,7 @@ use greentic_types::cbor::canonical;
 use greentic_types::i18n_text::I18nText;
 use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QaMode};
 use predicates::prelude::PredicateBooleanExt;
+use predicates::str::contains;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 use serde_yaml_bw::Value;
@@ -14,6 +15,16 @@ use tempfile::tempdir;
 
 fn read_yaml(path: &Path) -> Value {
     serde_yaml_bw::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn version_flag_prints_version() {
+    let expected = format!("greentic-flow {}", env!("CARGO_PKG_VERSION"));
+    cargo_bin_cmd!("greentic-flow")
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(contains(expected));
 }
 
 #[test]
