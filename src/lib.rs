@@ -5,29 +5,35 @@
 #![allow(clippy::result_large_err)]
 
 pub mod add_step;
+pub mod answers;
 pub mod component_catalog;
 pub mod component_schema;
 pub mod config_flow;
+pub mod contracts;
 pub mod error;
 pub mod flow_bundle;
 pub mod flow_ir;
 pub mod flow_meta;
+pub mod i18n;
 pub mod ir;
 pub mod json_output;
 pub mod lint;
 pub mod loader;
 pub mod model;
 pub mod path_safety;
+pub mod qa_runner;
 pub mod questions;
 pub mod questions_schema;
 pub mod registry;
 pub mod resolve;
 pub mod resolve_summary;
 pub mod schema_mode;
+pub mod schema_validate;
 pub mod splice;
 pub mod template;
 pub mod util;
 pub mod wizard_ops;
+pub mod wizard_state;
 
 pub use flow_bundle::{
     ComponentPin, FlowBundle, NodeRef, blake3_hex, canonicalize_json, extract_component_pins,

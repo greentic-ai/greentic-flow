@@ -3,7 +3,11 @@ use assert_cmd::prelude::*;
 use greentic_flow::loader::load_ygtc_from_path;
 use greentic_types::cbor::canonical;
 use greentic_types::i18n_text::I18nText;
-use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QaMode};
+use greentic_types::schemas::common::schema_ir::{AdditionalProperties, SchemaIr};
+use greentic_types::schemas::component::v0_6_0::{
+    ComponentDescribe, ComponentInfo, ComponentOperation, ComponentQaSpec, ComponentRunInput,
+    ComponentRunOutput, QaMode, schema_hash,
+};
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 use serde_json::Value as JsonValue;
@@ -125,6 +129,48 @@ fn add_step_wizard_uses_fixture_resolver() {
         .trim_start_matches("file://")
         .replace(['/', ':', '@'], "_");
 
+    let config_schema = SchemaIr::Object {
+        properties: BTreeMap::new(),
+        required: Vec::new(),
+        additional: AdditionalProperties::Allow,
+    };
+    let op_schema = SchemaIr::Object {
+        properties: BTreeMap::new(),
+        required: Vec::new(),
+        additional: AdditionalProperties::Allow,
+    };
+    let op_schema_hash = schema_hash(&op_schema, &op_schema, &config_schema).unwrap();
+    let describe = ComponentDescribe {
+        info: ComponentInfo {
+            id: "acme.widget".to_string(),
+            version: "0.1.0".to_string(),
+            role: "tool".to_string(),
+            display_name: None,
+        },
+        provided_capabilities: Vec::new(),
+        required_capabilities: Vec::new(),
+        metadata: BTreeMap::new(),
+        operations: vec![ComponentOperation {
+            id: "run".to_string(),
+            display_name: None,
+            input: ComponentRunInput {
+                schema: op_schema.clone(),
+            },
+            output: ComponentRunOutput { schema: op_schema },
+            defaults: BTreeMap::new(),
+            redactions: Vec::new(),
+            constraints: BTreeMap::new(),
+            schema_hash: op_schema_hash,
+        }],
+        config_schema,
+    };
+    let describe_cbor = canonical::to_canonical_cbor_allow_floats(&describe).unwrap();
+    fs::write(
+        fixture_dir.join(format!("{key}.describe.cbor")),
+        describe_cbor,
+    )
+    .unwrap();
+
     let spec = ComponentQaSpec {
         mode: QaMode::Default,
         title: I18nText::new("title", Some("Fixture Wizard".to_string())),
@@ -145,7 +191,6 @@ fn add_step_wizard_uses_fixture_resolver() {
         apply_cbor,
     )
     .unwrap();
-    fs::write(fixture_dir.join(format!("{key}.describe.cbor")), []).unwrap();
     fs::write(fixture_dir.join(format!("{key}.abi")), "0.6.0").unwrap();
 
     cargo_bin_cmd!("greentic-flow")

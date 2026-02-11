@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Result, anyhow};
 use serde_json::Value as JsonValue;
 
+use crate::i18n::{I18nCatalog, resolve_text};
 use greentic_types::cbor::canonical;
 use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QaMode, QuestionKind};
 
@@ -310,14 +311,14 @@ pub fn cbor_value_to_json(value: &ciborium::value::Value) -> Result<JsonValue> {
     })
 }
 
-pub fn qa_spec_to_questions(spec: &ComponentQaSpec) -> Vec<crate::questions::Question> {
+pub fn qa_spec_to_questions(
+    spec: &ComponentQaSpec,
+    catalog: &I18nCatalog,
+    locale: &str,
+) -> Vec<crate::questions::Question> {
     let mut out = Vec::new();
     for question in &spec.questions {
-        let prompt = question
-            .label
-            .fallback
-            .clone()
-            .unwrap_or_else(|| question.label.key.clone());
+        let prompt = resolve_text(&question.label, catalog, locale);
         let default = question
             .default
             .as_ref()
@@ -330,6 +331,7 @@ pub fn qa_spec_to_questions(spec: &ComponentQaSpec) -> Vec<crate::questions::Que
             QuestionKind::Choice { options } => {
                 let mut values = Vec::new();
                 for option in options {
+                    let _label = resolve_text(&option.label, catalog, locale);
                     values.push(JsonValue::String(option.value.clone()));
                 }
                 (crate::questions::QuestionKind::Choice, values)

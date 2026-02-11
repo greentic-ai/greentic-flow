@@ -52,9 +52,17 @@ pub fn set_component_entry(
     abi_version: &str,
     digest: Option<&str>,
     exported_ops: &[String],
+    contract: Option<&ComponentContractMeta>,
 ) {
     let greentic = ensure_greentic_meta(meta);
     let components = ensure_child_map(greentic, "components");
+    let mut added_at = now_epoch_seconds();
+    if let Some(Value::Object(existing)) = components.get(node_id)
+        && let Some(Value::Number(number)) = existing.get("added_at")
+        && let Some(value) = number.as_u64()
+    {
+        added_at = value;
+    }
     let mut entry = serde_json::Map::new();
     entry.insert(
         "component_id".to_string(),
@@ -64,8 +72,37 @@ pub fn set_component_entry(
         "abi_version".to_string(),
         Value::String(abi_version.to_string()),
     );
+    if let Some(contract) = contract {
+        entry.insert(
+            "describe_hash".to_string(),
+            Value::String(contract.describe_hash.clone()),
+        );
+        entry.insert(
+            "operation_id".to_string(),
+            Value::String(contract.operation_id.clone()),
+        );
+        entry.insert(
+            "schema_hash".to_string(),
+            Value::String(contract.schema_hash.clone()),
+        );
+        if let Some(version) = &contract.component_version {
+            entry.insert(
+                "component_version".to_string(),
+                Value::String(version.clone()),
+            );
+        }
+        if let Some(world) = &contract.world {
+            entry.insert("world".to_string(), Value::String(world.clone()));
+        }
+        if let Some(config_schema_cbor) = &contract.config_schema_cbor {
+            entry.insert(
+                "config_schema_cbor".to_string(),
+                Value::String(config_schema_cbor.clone()),
+            );
+        }
+    }
     if let Some(d) = digest {
-        entry.insert("digest".to_string(), Value::String(d.to_string()));
+        entry.insert("resolved_digest".to_string(), Value::String(d.to_string()));
     }
     entry.insert(
         "exported_ops_seen".to_string(),
@@ -78,9 +115,22 @@ pub fn set_component_entry(
     );
     entry.insert(
         "added_at".to_string(),
+        Value::Number(serde_json::Number::from(added_at)),
+    );
+    entry.insert(
+        "updated_at".to_string(),
         Value::Number(serde_json::Number::from(now_epoch_seconds())),
     );
     components.insert(node_id.to_string(), Value::Object(entry));
+}
+
+pub struct ComponentContractMeta {
+    pub describe_hash: String,
+    pub operation_id: String,
+    pub schema_hash: String,
+    pub component_version: Option<String>,
+    pub world: Option<String>,
+    pub config_schema_cbor: Option<String>,
 }
 
 pub fn clear_component_entry(meta: &mut Option<Value>, node_id: &str) {
