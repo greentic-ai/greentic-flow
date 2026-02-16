@@ -21,6 +21,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Lint & Test
         run: |
+          ci/check_interfaces_alignment.sh
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets -- -D warnings
           cargo build --workspace --all-features

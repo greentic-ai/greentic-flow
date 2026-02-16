@@ -60,9 +60,9 @@ routing:
 }
 
 fn ystr(value: &str) -> YamlValue {
-    YamlValue::String(value.to_string(), None)
+    serde_yaml_bw::to_value(value).expect("string yaml value")
 }
 
 fn ybool(value: bool) -> YamlValue {
-    YamlValue::Bool(value, None)
+    serde_yaml_bw::to_value(value).expect("bool yaml value")
 }
