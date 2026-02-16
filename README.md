@@ -102,6 +102,12 @@ The sidecar records the remote reference and resolved digest (`--pin`). Perfect 
 - `greentic-flow delete-step --flow flows/main.ygtc --step mid --strategy splice`
   - Removes `mid` and splices predecessors to the deleted node’s targets; removes the sidecar entry too.
 
+## Wizard and Capability Boundaries
+- `greentic-flow` orchestrates wizard calls (`describe -> qa-spec -> apply-answers`) and flow/sidecar updates.
+- Capability gating is enforced by the runtime/operator host, not by `greentic-flow`.
+- Wizard summaries can display requested/provided capability groups from component `describe` output for operator visibility.
+- Wizard mode is `default|setup|update|remove`; legacy `upgrade` is still accepted as a deprecated alias across 0.6.x and will be removed in a future release.
+
 ## Validate flows (CI & local)
 
 ```

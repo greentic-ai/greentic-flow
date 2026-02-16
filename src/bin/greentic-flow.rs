@@ -384,7 +384,7 @@ struct UpdateStepArgs {
     /// Mode: default (default) or config.
     #[arg(long = "mode", default_value = "default", value_parser = ["config", "default"])]
     mode: String,
-    /// Optional wizard mode (default/setup/upgrade/remove).
+    /// Optional wizard mode (default/setup/update/remove).
     #[arg(long = "wizard-mode", value_enum)]
     wizard_mode: Option<WizardModeArg>,
     /// Optional new operation name (defaults to existing op key).
@@ -481,7 +481,7 @@ struct DeleteStepArgs {
     /// Node id to delete (optional when component metadata exists).
     #[arg(long = "step")]
     step: Option<String>,
-    /// Optional wizard mode (default/setup/upgrade/remove).
+    /// Optional wizard mode (default/setup/update/remove).
     #[arg(long = "wizard-mode", value_enum)]
     wizard_mode: Option<WizardModeArg>,
     /// Answers JSON/YAML string to merge with wizard prompts.
@@ -600,7 +600,7 @@ fn handle_wizard(
         WizardCommand::UpdateStep(mut args) => {
             args.args.interactive = !args.non_interactive;
             if args.args.wizard_mode.is_none() {
-                args.args.wizard_mode = Some(WizardModeArg::Upgrade);
+                args.args.wizard_mode = Some(WizardModeArg::Update);
             }
             handle_update_step(args.args, schema_mode, format, backup)
         }
@@ -1572,6 +1572,7 @@ mod tests {
     use super::serialize_doc;
     use greentic_flow::flow_ir::FlowIr;
     use greentic_flow::loader::load_ygtc_from_path;
+    use greentic_flow::wizard_ops::WizardMode;
     use serde_json::Value;
     use serde_json::json;
     use std::env;
@@ -1739,6 +1740,14 @@ mod tests {
     }
 
     #[test]
+    fn wizard_mode_upgrade_alias_maps_to_update() {
+        assert_eq!(
+            WizardModeArg::UpgradeDeprecated.to_mode(),
+            WizardMode::Update
+        );
+    }
+
+    #[test]
     fn fixture_registry_update_and_remove() {
         let dir = tempdir().expect("temp dir");
         let flow_path = dir.path().join("flow.ygtc");
@@ -1812,7 +1821,7 @@ mod tests {
                 flow_path: flow_path.clone(),
                 step: Some("widget".to_string()),
                 mode: "default".to_string(),
-                wizard_mode: Some(WizardModeArg::Upgrade),
+                wizard_mode: Some(WizardModeArg::Update),
                 operation: None,
                 routing_out: false,
                 routing_reply: false,
@@ -1984,7 +1993,7 @@ mod tests {
                 flow_path: flow_path.clone(),
                 step: Some("widget".to_string()),
                 mode: "default".to_string(),
-                wizard_mode: Some(WizardModeArg::Upgrade),
+                wizard_mode: Some(WizardModeArg::Update),
                 operation: None,
                 routing_out: false,
                 routing_reply: false,
@@ -2306,6 +2315,192 @@ fn wizard_header(component: &str, mode: &str) -> String {
     format!("== {component} ({mode}) ==")
 }
 
+fn warn_deprecated_wizard_mode(mode: WizardModeArg) -> Option<serde_json::Value> {
+    if matches!(mode, WizardModeArg::UpgradeDeprecated) {
+        eprintln!(
+            "warning: wizard mode 'upgrade' is deprecated; use 'update' (will be removed in a future release)"
+        );
+        return Some(json!({
+            "kind": "deprecation",
+            "field": "mode",
+            "old": "upgrade",
+            "new": "update",
+            "message": "wizard mode 'upgrade' is deprecated; use 'update' (will be removed in a future release)"
+        }));
+    }
+    None
+}
+
+fn print_json_payload_with_optional_diagnostic(
+    mut payload: serde_json::Value,
+    diagnostic: Option<&serde_json::Value>,
+) -> Result<()> {
+    if let Some(diag) = diagnostic
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert(
+            "diagnostics".to_string(),
+            serde_json::Value::Array(vec![diag.clone()]),
+        );
+    }
+    print_json_payload(&payload)
+}
+
+fn normalize_capability_group(raw: &str) -> String {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return normalized;
+    }
+    if let Some(rest) = normalized.strip_prefix("wasi.") {
+        let head = rest.split(['.', ':', '/']).next().unwrap_or(rest);
+        return format!("wasi:{head}");
+    }
+    if let Some(rest) = normalized.strip_prefix("host.") {
+        let head = rest.split(['.', ':', '/']).next().unwrap_or(rest);
+        return format!("host:{head}");
+    }
+    if normalized.contains(':') {
+        return normalized;
+    }
+    if let Some((left, right)) = normalized.split_once('.') {
+        let head = right.split(['.', ':', '/']).next().unwrap_or(right);
+        return format!("{left}:{head}");
+    }
+    normalized
+}
+
+fn grouped_capabilities(caps: &[String]) -> Vec<String> {
+    let mut groups = BTreeSet::new();
+    for cap in caps {
+        groups.insert(normalize_capability_group(cap));
+    }
+    groups.into_iter().collect()
+}
+
+fn maybe_print_capability_summary(
+    format: OutputFormat,
+    describe: &greentic_types::schemas::component::v0_6_0::ComponentDescribe,
+) {
+    if !matches!(format, OutputFormat::Human) {
+        return;
+    }
+    let requested = grouped_capabilities(&describe.required_capabilities);
+    if !requested.is_empty() {
+        println!("requested capabilities: {}", requested.join(", "));
+    }
+    let provided = grouped_capabilities(&describe.provided_capabilities);
+    if !provided.is_empty() {
+        println!("provided capabilities: {}", provided.join(", "));
+    }
+    if std::env::var("RUST_LOG")
+        .ok()
+        .is_some_and(|v| v.contains("debug") || v.contains("trace"))
+    {
+        if !describe.required_capabilities.is_empty() {
+            println!(
+                "requested capabilities (raw): {}",
+                describe.required_capabilities.join(", ")
+            );
+        }
+        if !describe.provided_capabilities.is_empty() {
+            println!(
+                "provided capabilities (raw): {}",
+                describe.provided_capabilities.join(", ")
+            );
+        }
+    }
+}
+
+fn capability_hint_from_error(
+    err: &anyhow::Error,
+    describe: Option<&greentic_types::schemas::component::v0_6_0::ComponentDescribe>,
+) -> Option<String> {
+    let lower = err.to_string().to_ascii_lowercase();
+    let inferred = if lower.contains("secret") {
+        Some("host:secrets")
+    } else if lower.contains("state") {
+        Some("host:state")
+    } else if lower.contains("http") {
+        Some("host:http")
+    } else if lower.contains("config") {
+        Some("host:config")
+    } else {
+        None
+    };
+    if let Some(cap) = inferred {
+        return Some(cap.to_string());
+    }
+    describe.and_then(|d| {
+        grouped_capabilities(&d.required_capabilities)
+            .into_iter()
+            .next()
+    })
+}
+
+fn wizard_op_from_error(err: &anyhow::Error, fallback: &str) -> String {
+    let lower = err.to_string().to_ascii_lowercase();
+    if lower.contains("call describe") {
+        "describe".to_string()
+    } else if lower.contains("call qa-spec") {
+        "qa-spec".to_string()
+    } else if lower.contains("call apply-answers") {
+        "apply-answers".to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn wrap_wizard_error(
+    err: anyhow::Error,
+    component_id: &str,
+    op_fallback: &str,
+    describe: Option<&greentic_types::schemas::component::v0_6_0::ComponentDescribe>,
+) -> anyhow::Error {
+    let op = wizard_op_from_error(&err, op_fallback);
+    if let Some(cap) = capability_hint_from_error(&err, describe) {
+        anyhow!(
+            "component '{component_id}' operation '{op}' failed due to denied host ref; requested capability '{cap}'. hint: grant capability {cap} to this component"
+        )
+        .context(err)
+    } else {
+        anyhow!("component '{component_id}' operation '{op}' failed").context(err)
+    }
+}
+
+fn wizard_mode_legacy_label(mode: wizard_ops::WizardMode) -> Option<&'static str> {
+    match mode {
+        wizard_ops::WizardMode::Update => Some("upgrade"),
+        _ => None,
+    }
+}
+
+fn wizard_answers_json_path(
+    base_dir: &Path,
+    flow_id: &str,
+    node_id: &str,
+    mode: wizard_ops::WizardMode,
+) -> PathBuf {
+    answers::answers_paths(base_dir, flow_id, node_id, mode.as_str()).json
+}
+
+fn wizard_answers_json_path_compat(
+    base_dir: &Path,
+    flow_id: &str,
+    node_id: &str,
+    mode: wizard_ops::WizardMode,
+) -> Option<PathBuf> {
+    let primary = wizard_answers_json_path(base_dir, flow_id, node_id, mode);
+    if primary.exists() {
+        return Some(primary);
+    }
+    let legacy = wizard_mode_legacy_label(mode).map(|label| {
+        answers::answers_paths(base_dir, flow_id, node_id, label)
+            .json
+            .to_path_buf()
+    });
+    legacy.filter(|path| path.exists())
+}
+
 fn warn_unknown_keys(answers: &QuestionAnswers, questions: &[Question]) {
     if questions.is_empty() || answers.is_empty() {
         return;
@@ -2335,7 +2530,9 @@ enum AddStepMode {
 enum WizardModeArg {
     Default,
     Setup,
-    Upgrade,
+    Update,
+    #[value(name = "upgrade", hide = true)]
+    UpgradeDeprecated,
     Remove,
 }
 
@@ -2344,7 +2541,9 @@ impl WizardModeArg {
         match self {
             WizardModeArg::Default => wizard_ops::WizardMode::Default,
             WizardModeArg::Setup => wizard_ops::WizardMode::Setup,
-            WizardModeArg::Upgrade => wizard_ops::WizardMode::Upgrade,
+            WizardModeArg::Update | WizardModeArg::UpgradeDeprecated => {
+                wizard_ops::WizardMode::Update
+            }
             WizardModeArg::Remove => wizard_ops::WizardMode::Remove,
         }
     }
@@ -2367,7 +2566,7 @@ struct AddStepArgs {
     /// Optional pack alias for the new node.
     #[arg(long = "pack-alias")]
     pack_alias: Option<String>,
-    /// Optional wizard mode (default/setup/upgrade/remove).
+    /// Optional wizard mode (default/setup/update/remove).
     #[arg(long = "wizard-mode", value_enum)]
     wizard_mode: Option<WizardModeArg>,
     /// Optional operation for the new node.
@@ -2642,7 +2841,9 @@ fn handle_add_step(
         let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
         let doc = load_ygtc_from_path(&args.flow_path)?;
         let flow_ir = FlowIr::from_doc(doc)?;
-        let wizard_mode = args.wizard_mode.unwrap_or(WizardModeArg::Default).to_mode();
+        let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Default);
+        let deprecation_diagnostic = warn_deprecated_wizard_mode(wizard_mode_arg);
+        let wizard_mode = wizard_mode_arg.to_mode();
         let resolved = resolve_wizard_component(
             &args.flow_path,
             wizard_mode,
@@ -2664,9 +2865,11 @@ fn handle_add_step(
                 qa_spec_cbor: fixture.qa_spec_cbor.clone(),
             }
         } else {
-            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)?
+            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)
+                .map_err(|err| wrap_wizard_error(err, &component_identity, "describe", None))?
         };
         let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
+        let describe_for_caps = contracts::decode_component_describe(&spec.describe_cbor).ok();
         let (catalog, locale) = default_i18n_catalog(args.locale.as_deref());
 
         let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
@@ -2677,6 +2880,9 @@ fn handle_add_step(
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
             );
+            if let Some(describe) = describe_for_caps.as_ref() {
+                maybe_print_capability_summary(format, describe);
+            }
             if args.interactive {
                 answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
             } else {
@@ -2695,7 +2901,15 @@ fn handle_add_step(
                 wizard_mode,
                 &current_config,
                 &answers_cbor,
-            )?
+            )
+            .map_err(|err| {
+                wrap_wizard_error(
+                    err,
+                    &component_identity,
+                    "apply-answers",
+                    describe_for_caps.as_ref(),
+                )
+            })?
         };
         let operation_id = args.operation.clone().unwrap_or_else(|| "run".to_string());
         let (describe, contract_meta) = derive_contract_meta(&spec.describe_cbor, &operation_id)?;
@@ -2772,7 +2986,10 @@ fn handle_add_step(
         if args.validate_only {
             if matches!(format, OutputFormat::Json) {
                 let payload = json!({"ok": true, "action": "add-step", "validate_only": true});
-                print_json_payload(&payload)?;
+                print_json_payload_with_optional_diagnostic(
+                    payload,
+                    deprecation_diagnostic.as_ref(),
+                )?;
             } else {
                 println!("add-step validation succeeded");
             }
@@ -2824,7 +3041,10 @@ fn handle_add_step(
                     "node_id": inserted_id,
                     "flow_path": args.flow_path.display().to_string()
                 });
-                print_json_payload(&payload)?;
+                print_json_payload_with_optional_diagnostic(
+                    payload,
+                    deprecation_diagnostic.as_ref(),
+                )?;
             } else {
                 println!(
                     "Inserted node after '{}' and wrote {}",
@@ -2835,7 +3055,7 @@ fn handle_add_step(
         } else if matches!(format, OutputFormat::Json) {
             let payload =
                 json!({"ok": true, "action": "add-step", "dry_run": true, "flow": output});
-            print_json_payload(&payload)?;
+            print_json_payload_with_optional_diagnostic(payload, deprecation_diagnostic.as_ref())?;
         } else {
             print!("{output}");
         }
@@ -3058,7 +3278,9 @@ fn handle_update_step(
     let wizard_requested = args.component_id.is_some() || args.wizard_mode.is_some();
     if wizard_requested {
         let (sidecar_path, mut sidecar) = ensure_sidecar(&args.flow_path)?;
-        let wizard_mode = args.wizard_mode.unwrap_or(WizardModeArg::Upgrade).to_mode();
+        let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Update);
+        let deprecation_diagnostic = warn_deprecated_wizard_mode(wizard_mode_arg);
+        let wizard_mode = wizard_mode_arg.to_mode();
         let resolved = resolve_wizard_component(
             &args.flow_path,
             wizard_mode,
@@ -3080,17 +3302,17 @@ fn handle_update_step(
                 qa_spec_cbor: fixture.qa_spec_cbor.clone(),
             }
         } else {
-            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)?
+            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)
+                .map_err(|err| wrap_wizard_error(err, &component_identity, "describe", None))?
         };
         let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
+        let describe_for_caps = contracts::decode_component_describe(&spec.describe_cbor).ok();
         let (catalog, locale) = default_i18n_catalog(args.locale.as_deref());
 
         let base_dir = answers_base_dir(&args.flow_path, args.answers_dir.as_deref());
         let fallback_path = if !args.reask && args.answers.is_none() && args.answers_file.is_none()
         {
-            let path =
-                answers::answers_paths(&base_dir, &flow_ir.id, &step_id, wizard_mode.as_str()).json;
-            if path.exists() { Some(path) } else { None }
+            wizard_answers_json_path_compat(&base_dir, &flow_ir.id, &step_id, wizard_mode)
         } else {
             None
         };
@@ -3103,6 +3325,9 @@ fn handle_update_step(
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
             );
+            if let Some(describe) = describe_for_caps.as_ref() {
+                maybe_print_capability_summary(format, describe);
+            }
             if args.interactive {
                 answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
             } else {
@@ -3126,7 +3351,15 @@ fn handle_update_step(
                 wizard_mode,
                 &current_config,
                 &answers_cbor,
-            )?
+            )
+            .map_err(|err| {
+                wrap_wizard_error(
+                    err,
+                    &component_identity,
+                    "apply-answers",
+                    describe_for_caps.as_ref(),
+                )
+            })?
         };
         let mut new_operation = node.operation.clone();
         if let Some(op) = args.operation.clone() {
@@ -3215,14 +3448,17 @@ fn handle_update_step(
                     "node_id": step_id,
                     "flow_path": args.flow_path.display().to_string()
                 });
-                print_json_payload(&payload)?;
+                print_json_payload_with_optional_diagnostic(
+                    payload,
+                    deprecation_diagnostic.as_ref(),
+                )?;
             } else {
                 println!("Updated step '{}' in {}", step_id, args.flow_path.display());
             }
         } else if matches!(format, OutputFormat::Json) {
             let payload =
                 json!({"ok": true, "action": "update-step", "dry_run": true, "flow": yaml});
-            print_json_payload(&payload)?;
+            print_json_payload_with_optional_diagnostic(payload, deprecation_diagnostic.as_ref())?;
         } else {
             print!("{yaml}");
         }
@@ -3415,8 +3651,11 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
         .unwrap_or_else(|| "component".to_string());
     let target = resolve_step_id(args.step.clone(), args.component_id.as_ref(), &flow_ir.meta)?;
     let wizard_requested = args.component_id.is_some() || args.wizard_mode.is_some();
+    let mut deprecation_diagnostic: Option<serde_json::Value> = None;
     if wizard_requested {
-        let wizard_mode = args.wizard_mode.unwrap_or(WizardModeArg::Remove).to_mode();
+        let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Remove);
+        deprecation_diagnostic = warn_deprecated_wizard_mode(wizard_mode_arg);
+        let wizard_mode = wizard_mode_arg.to_mode();
         let resolved = resolve_wizard_component(
             &args.flow_path,
             wizard_mode,
@@ -3438,17 +3677,17 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
                 qa_spec_cbor: fixture.qa_spec_cbor.clone(),
             }
         } else {
-            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)?
+            wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)
+                .map_err(|err| wrap_wizard_error(err, &component_identity, "describe", None))?
         };
         let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
+        let describe_for_caps = contracts::decode_component_describe(&spec.describe_cbor).ok();
         let (catalog, locale) = default_i18n_catalog(args.locale.as_deref());
 
         let base_dir = answers_base_dir(&args.flow_path, args.answers_dir.as_deref());
         let fallback_path = if !args.reask && args.answers.is_none() && args.answers_file.is_none()
         {
-            let path =
-                answers::answers_paths(&base_dir, &flow_ir.id, &target, wizard_mode.as_str()).json;
-            if path.exists() { Some(path) } else { None }
+            wizard_answers_json_path_compat(&base_dir, &flow_ir.id, &target, wizard_mode)
         } else {
             None
         };
@@ -3461,6 +3700,9 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
             );
+            if let Some(describe) = describe_for_caps.as_ref() {
+                maybe_print_capability_summary(format, describe);
+            }
             if args.interactive {
                 answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
             } else {
@@ -3484,7 +3726,15 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
                 wizard_mode,
                 &current_config,
                 &answers_cbor,
-            )?;
+            )
+            .map_err(|err| {
+                wrap_wizard_error(
+                    err,
+                    &component_identity,
+                    "apply-answers",
+                    describe_for_caps.as_ref(),
+                )
+            })?;
         }
         flow_meta::clear_component_entry(&mut flow_ir.meta, &target);
         if args.write {
@@ -3596,7 +3846,7 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
                 "node_id": target,
                 "flow_path": args.flow_path.display().to_string()
             });
-            print_json_payload(&payload)?;
+            print_json_payload_with_optional_diagnostic(payload, deprecation_diagnostic.as_ref())?;
         } else {
             println!(
                 "Deleted step '{}' from {}",
@@ -3606,7 +3856,7 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
         }
     } else if matches!(format, OutputFormat::Json) {
         let payload = json!({"ok": true, "action": "delete-step", "dry_run": true, "flow": yaml});
-        print_json_payload(&payload)?;
+        print_json_payload_with_optional_diagnostic(payload, deprecation_diagnostic.as_ref())?;
     } else {
         print!("{yaml}");
     }
@@ -4345,13 +4595,32 @@ fn resolve_fixture_wizard(
     };
     let root = Path::new(root);
     let mode = wizard_mode.as_str();
+    let legacy_mode = wizard_mode_legacy_label(wizard_mode);
     if let Some(index) = load_fixture_index(root)?
         && let Some(entry) = fixture_entry_for_reference(&index, reference)
     {
         let dir = fixture_component_dir(root, reference, Some(entry));
         let describe_path = dir.join("describe.cbor");
-        let qa_spec_path = dir.join(format!("qa_{mode}.cbor"));
-        let apply_path = dir.join(format!("apply_{mode}_config.cbor"));
+        let qa_spec_path = {
+            let path = dir.join(format!("qa_{mode}.cbor"));
+            if path.exists() {
+                path
+            } else if let Some(legacy) = legacy_mode {
+                dir.join(format!("qa_{legacy}.cbor"))
+            } else {
+                path
+            }
+        };
+        let apply_path = {
+            let path = dir.join(format!("apply_{mode}_config.cbor"));
+            if path.exists() {
+                path
+            } else if let Some(legacy) = legacy_mode {
+                dir.join(format!("apply_{legacy}_config.cbor"))
+            } else {
+                path
+            }
+        };
         if !qa_spec_path.exists() || !apply_path.exists() {
             anyhow::bail!(
                 "fixture wizard missing qa/apply for {} (expected {} and {})",
@@ -4389,13 +4658,24 @@ fn resolve_fixture_wizard(
     let key = fixture_key(reference);
     let mode_path = root.join(format!("{key}.qa-{mode}.cbor"));
     let mode_apply = root.join(format!("{key}.apply-{mode}-config.cbor"));
+    let legacy_mode_path = legacy_mode.map(|legacy| root.join(format!("{key}.qa-{legacy}.cbor")));
+    let legacy_mode_apply =
+        legacy_mode.map(|legacy| root.join(format!("{key}.apply-{legacy}-config.cbor")));
     let qa_spec_path = if mode_path.exists() {
         mode_path
+    } else if let Some(path) = legacy_mode_path
+        && path.exists()
+    {
+        path
     } else {
         root.join(format!("{key}.qa-spec.cbor"))
     };
     let apply_path = if mode_apply.exists() {
         mode_apply
+    } else if let Some(path) = legacy_mode_apply
+        && path.exists()
+    {
+        path
     } else {
         root.join(format!("{key}.apply-answers.cbor"))
     };

@@ -4,7 +4,7 @@ world component-wizard {
   enum qa-mode {
     default,
     setup,
-    upgrade,
+    update,
     remove,
   }
 

@@ -35,10 +35,17 @@ pub fn load_wizard_state(flow_path: &Path, flow_id: &str) -> Result<Option<Wizar
         message: format!("read wizard state: {err}"),
         location: FlowErrorLocation::new(None, None, None),
     })?;
-    let state: WizardState = canonical::from_cbor(&bytes).map_err(|err| FlowError::Internal {
-        message: format!("decode wizard state: {err}"),
-        location: FlowErrorLocation::new(None, None, None),
-    })?;
+    let mut state: WizardState =
+        canonical::from_cbor(&bytes).map_err(|err| FlowError::Internal {
+            message: format!("decode wizard state: {err}"),
+            location: FlowErrorLocation::new(None, None, None),
+        })?;
+    // Compatibility: keep legacy persisted "upgrade" mode readable in 0.6.x.
+    for step in &mut state.steps {
+        if step.mode == "upgrade" {
+            step.mode = "update".to_string();
+        }
+    }
     Ok(Some(state))
 }
 
@@ -49,6 +56,7 @@ pub fn update_wizard_state(
     mode: &str,
     locale: &str,
 ) -> Result<()> {
+    let mode = if mode == "upgrade" { "update" } else { mode };
     let mut state = load_wizard_state(flow_path, flow_id)?.unwrap_or_else(|| WizardState {
         flow_id: flow_id.to_string(),
         locale: locale.to_string(),

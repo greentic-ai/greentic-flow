@@ -17,7 +17,7 @@ pub enum WizardAbi {
 pub enum WizardMode {
     Default,
     Setup,
-    Upgrade,
+    Update,
     Remove,
 }
 
@@ -26,7 +26,7 @@ impl WizardMode {
         match self {
             WizardMode::Default => "default",
             WizardMode::Setup => "setup",
-            WizardMode::Upgrade => "upgrade",
+            WizardMode::Update => "update",
             WizardMode::Remove => "remove",
         }
     }
@@ -35,8 +35,15 @@ impl WizardMode {
         match self {
             WizardMode::Default => QaMode::Default,
             WizardMode::Setup => QaMode::Setup,
-            WizardMode::Upgrade => QaMode::Upgrade,
+            WizardMode::Update => QaMode::Update,
             WizardMode::Remove => QaMode::Remove,
+        }
+    }
+
+    pub fn as_legacy_str(self) -> &'static str {
+        match self {
+            WizardMode::Update => "upgrade",
+            _ => self.as_str(),
         }
     }
 }
@@ -153,7 +160,7 @@ mod host {
             .call_describe(&mut store)
             .map_err(|err| anyhow!("call describe: {err}"))?;
         let qa_spec_cbor = api
-            .call_qa_spec(&mut store, mode.as_str())
+            .call_qa_spec(&mut store, mode.as_legacy_str())
             .map_err(|err| anyhow!("call qa-spec: {err}"))?;
 
         Ok(WizardSpecOutput {
@@ -190,7 +197,7 @@ mod host {
         let api = ComponentWizardLegacy::instantiate(&mut store, &component, &linker)
             .map_err(|err| anyhow!("instantiate component wizard (legacy): {err}"))?;
 
-        api.call_apply_answers(&mut store, mode.as_str(), answers)
+        api.call_apply_answers(&mut store, mode.as_legacy_str(), answers)
             .map_err(|err| anyhow!("call apply-answers: {err}"))
     }
 
@@ -198,7 +205,7 @@ mod host {
         match mode {
             WizardMode::Default => QaMode::Default,
             WizardMode::Setup => QaMode::Setup,
-            WizardMode::Upgrade => QaMode::Upgrade,
+            WizardMode::Update => QaMode::Update,
             WizardMode::Remove => QaMode::Remove,
         }
     }

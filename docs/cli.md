@@ -107,6 +107,11 @@ Sidecar expectations:
 - Relative `--local-wasm` inputs are resolved from your current working directory, then normalized to the flow directory.
 - `--pin` hashes local wasm or resolves remote tags to digests; stored in `*.ygtc.resolve.json`.
 
+Wizard mode notes:
+- `--wizard-mode` supports `default|setup|update|remove`.
+- `--wizard-mode upgrade` is accepted as a deprecated alias for `update` across 0.6.x. The CLI warns on stderr and includes a non-fatal deprecation diagnostic in JSON output.
+- `greentic-flow` does not enforce host capability permissions. Enforcement is runtime/operator-owned; this CLI only surfaces capability summaries from `describe` when available.
+
 Safety/inspection:
 - `--dry-run` prints the updated flow without writing; `--validate-only` plans/validates without changing files.
 
@@ -122,6 +127,7 @@ Requires a sidecar entry for the node; errors if missing (suggests `bind-compone
 
 Config mode reads `dev_flows.default` from the component manifest alongside the bound wasm (or cached remote component) to re-materialize the payload before applying overrides.
 - If the selected dev_flow defines questions, update-step prompts interactively for missing required values unless `--non-interactive` is set. `show_if` rules are honored.
+- Wizard mode names are `default|setup|update|remove`; `upgrade` remains a deprecated alias for `update` in 0.6.x and emits a warning.
 
 ### delete-step
 Remove a node and optionally splice predecessors to its routing.
@@ -184,6 +190,7 @@ greentic-flow doctor-answers --schema answers.schema.json --answers answers.json
 - add-step/update-step/delete-step/bind-component print a summary line; flows are written unless `--dry-run`/`--validate-only`.
 - Sidecar (`*.ygtc.resolve.json`): schema_version=1; `nodes.{id}.source` contains `kind` (`local` or `remote`), `path` or `reference`, and optional `digest` when `--pin` is used.
 - doctor `--json` output matches `LintJsonOutput` (ok flag, diagnostics, bundle metadata).
+- Wizard JSON outputs include `diagnostics` when a deprecated mode alias is used (for example `upgrade -> update`).
 
 ## Validation and warnings
 - Flows must be YGTc v2 (one op key per node, routing shorthand allowed). Legacy `component.exec` is accepted on read but emitted as v2.
