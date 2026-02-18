@@ -21,8 +21,8 @@ jobs:
         run: rustc --version
       - name: cargo fmt --check
         run: cargo fmt --check
-      - name: verify greentic-interfaces alignment
-        run: ci/check_interfaces_alignment.sh
+      - name: verify canonical greentic component WIT is not vendored
+        run: ci/check_no_duplicate_canonical_wit.sh
 
   clippy:
     runs-on: ubuntu-latest
@@ -36,8 +36,8 @@ jobs:
       - name: rustc --version
         run: rustc --version
       - uses: Swatinem/rust-cache@v2
-      - name: verify greentic-interfaces alignment
-        run: ci/check_interfaces_alignment.sh
+      - name: verify canonical greentic component WIT is not vendored
+        run: ci/check_no_duplicate_canonical_wit.sh
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -52,8 +52,8 @@ jobs:
       - name: rustc --version
         run: rustc --version
       - uses: Swatinem/rust-cache@v2
-      - name: verify greentic-interfaces alignment
-        run: ci/check_interfaces_alignment.sh
+      - name: verify canonical greentic component WIT is not vendored
+        run: ci/check_no_duplicate_canonical_wit.sh
       - name: cargo test
         run: cargo test --all-features
       - name: greentic-flow doctor --json smoke

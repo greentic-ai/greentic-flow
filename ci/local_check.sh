@@ -53,11 +53,11 @@ else
   skip_step "cargo not found"
 fi
 
-step "Verify greentic-interfaces alignment"
-if [[ -x ci/check_interfaces_alignment.sh ]]; then
-  ci/check_interfaces_alignment.sh
+step "Verify canonical greentic component WIT is not vendored"
+if [[ -x ci/check_no_duplicate_canonical_wit.sh ]]; then
+  ci/check_no_duplicate_canonical_wit.sh
 else
-  skip_step "ci/check_interfaces_alignment.sh missing or not executable" 1
+  skip_step "ci/check_no_duplicate_canonical_wit.sh missing or not executable" 1
 fi
 
 step "cargo fmt --all -- --check"

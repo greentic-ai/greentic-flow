@@ -23,6 +23,8 @@ jobs:
       with:
         toolchain: 1.90.0
         override: true
+    - name: verify canonical greentic component WIT is not vendored
+      run: ci/check_no_duplicate_canonical_wit.sh
     - name: Build
       run: cargo build --verbose
     - name: Run tests

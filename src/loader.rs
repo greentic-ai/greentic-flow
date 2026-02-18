@@ -408,7 +408,7 @@ fn ensure_nodes_mapping(doc: &mut serde_yaml_bw::Value) {
     let Some(mapping) = doc.as_mapping_mut() else {
         return;
     };
-    let nodes_key = serde_yaml_bw::Value::String("nodes".to_string());
+    let nodes_key = serde_yaml_bw::Value::String("nodes".to_string(), None);
     match mapping.get_mut(&nodes_key) {
         Some(existing) => {
             if existing.is_null() {
