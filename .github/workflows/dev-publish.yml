@@ -15,11 +15,11 @@ jobs:
       - name: Dynamic Patch Greentic Dependencies
         run: |
           pkg_name=$(grep '^name =' Cargo.toml | head -n 1 | cut -d'"' -f2)
-          deps=$(grep -oE 'greentic-[a-zA-Z0-9-]+' Cargo.toml | grep -v "$pkg_name" | sort -u || true)
+          deps=$(grep -oE '^[[:space:]]*greentic-[a-zA-Z0-9-]+' Cargo.toml | tr -d ' ' | grep -v "$pkg_name" | sort -u || true)
           if [ ! -z "$deps" ]; then
             echo -e "\n[patch.crates-io]" >> Cargo.toml
             for d in $deps; do
-              echo "$d = { git = 'https://github.com/greentic-ai/$d', branch = 'develop' }" >> Cargo.toml
+              echo "$d = { git = 'https://github.com/greentic-ai-org/$d', branch = 'develop' }" >> Cargo.toml
             done
           fi
           
@@ -56,11 +56,11 @@ jobs:
       - name: Dynamic Patch Greentic Dependencies (bin build)
         run: |
           pkg_name=$(grep '^name =' Cargo.toml | head -n 1 | cut -d'"' -f2)
-          deps=$(grep -oE 'greentic-[a-zA-Z0-9-]+' Cargo.toml | grep -v "$pkg_name" | sort -u || true)
+          deps=$(grep -oE '^[[:space:]]*greentic-[a-zA-Z0-9-]+' Cargo.toml | tr -d ' ' | grep -v "$pkg_name" | sort -u || true)
           if [ ! -z "$deps" ]; then
             echo -e "\n[patch.crates-io]" >> Cargo.toml
             for d in $deps; do
-              echo "$d = { git = 'https://github.com/greentic-ai/$d', branch = 'develop' }" >> Cargo.toml
+              echo "$d = { git = 'https://github.com/greentic-ai-org/$d', branch = 'develop' }" >> Cargo.toml
             done
           fi
 
