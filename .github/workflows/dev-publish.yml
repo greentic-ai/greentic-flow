@@ -1,0 +1,102 @@
+name: Dev Publish (latest-dev)
+
+on:
+  push:
+    branches: [ develop ]
+  workflow_dispatch: {}
+
+jobs:
+  build-test:
+    name: CI (lint/test/build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Dynamic Patch Greentic Dependencies
+        run: |
+          pkg_name=$(grep '^name =' Cargo.toml | head -n 1 | cut -d'"' -f2)
+          deps=$(grep -oE 'greentic-[a-zA-Z0-9-]+' Cargo.toml | grep -v "$pkg_name" | sort -u || true)
+          if [ ! -z "$deps" ]; then
+            echo -e "\n[patch.crates-io]" >> Cargo.toml
+            for d in $deps; do
+              echo "$d = { git = 'https://github.com/greentic-ai/$d', branch = 'develop' }" >> Cargo.toml
+            done
+          fi
+          
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          toolchain: 1.90.0
+          override: true
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Lint & Test
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo build --workspace
+          cargo test --workspace
+
+  dev-release:
+    name: Build binaries + Dev Release
+    needs: build-test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_suffix: ".exe"
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Dynamic Patch Greentic Dependencies (bin build)
+        run: |
+          pkg_name=$(grep '^name =' Cargo.toml | head -n 1 | cut -d'"' -f2)
+          deps=$(grep -oE 'greentic-[a-zA-Z0-9-]+' Cargo.toml | grep -v "$pkg_name" | sort -u || true)
+          if [ ! -z "$deps" ]; then
+            echo -e "\n[patch.crates-io]" >> Cargo.toml
+            for d in $deps; do
+              echo "$d = { git = 'https://github.com/greentic-ai/$d', branch = 'develop' }" >> Cargo.toml
+            done
+          fi
+
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          toolchain: 1.90.0
+          override: true
+          targets: ${{ matrix.target }}
+      
+      - name: Build release binary
+        run: cargo build --locked --release --target ${{ matrix.target }} --package greentic-flow
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          target="${{ matrix.target }}"
+          bin_suffix="${{ matrix.bin_suffix }}"
+          mkdir -p dist
+          cp "target/${target}/release/greentic-flow${bin_suffix}" "dist/greentic-flow-${target}${bin_suffix}"
+          echo "artifact=dist/greentic-flow-${target}${bin_suffix}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Rolling Release
+        if: matrix.os == 'ubuntu-latest' # Only run release update once
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest-dev --yes || true
+          git tag -d latest-dev || true
+          git push origin :refs/tags/latest-dev || true
+          git tag latest-dev
+          git push origin latest-dev
+          gh release create latest-dev --prerelease --title "Development Build" --notes "Rolling release for dev."
+
+      - name: Upload Binary to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload latest-dev ${{ steps.package.outputs.artifact }} --clobber
