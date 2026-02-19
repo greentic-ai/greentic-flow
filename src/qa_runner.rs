@@ -192,7 +192,7 @@ fn component_spec_to_form(spec: &ComponentQaSpec, catalog: &I18nCatalog, locale:
         });
     }
     FormSpec {
-        id: "component-wizard".to_string(),
+        id: "component-setup".to_string(),
         title,
         version: "0.6.0".to_string(),
         description,

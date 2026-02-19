@@ -13,9 +13,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
-          toolchain: 1.90.0
+          toolchain: 1.91.0
           override: true
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -36,9 +36,9 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
-          toolchain: stable
+          toolchain: 1.91.0
           override: true
       - uses: Swatinem/rust-cache@v2
       - name: Publish changed crates
@@ -77,9 +77,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
-          toolchain: 1.90.0
+          toolchain: 1.91.0
           override: true
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2

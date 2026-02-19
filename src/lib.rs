@@ -8,6 +8,7 @@ pub mod add_step;
 pub mod answers;
 pub mod component_catalog;
 pub mod component_schema;
+pub mod component_setup;
 pub mod config_flow;
 pub mod contracts;
 pub mod error;

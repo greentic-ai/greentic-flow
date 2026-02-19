@@ -19,9 +19,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@1.90.0
+    - uses: dtolnay/rust-toolchain@1.91.0
       with:
-        toolchain: 1.90.0
+        toolchain: 1.91.0
         override: true
     - name: verify canonical greentic component WIT is not vendored
       run: ci/check_no_duplicate_canonical_wit.sh

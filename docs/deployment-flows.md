@@ -24,31 +24,15 @@ infrastructure-as-code (IaC) artifacts.
 `greentic-flow` exposes a CLI scaffolder to speed up authoring:
 
 ```bash
-greentic-flow new flows/deploy_stack.ygtc --kind deployment
+greentic-flow new --flow flows/deploy_stack.ygtc --id deploy-stack --type events
 ```
 
 This command:
 
-1. Writes a minimal two-node template where the first node references an opaque
-   deployment component (`deploy.renderer` in the template) and reminds authors
-   to use the deploy-plan world.
+1. Writes a minimal YGTc v2 flow document.
 2. Marks the flow as `type: events`.
-3. (Optionally) Reads `manifest.yaml` to determine whether the pack declares
-   `kind: deployment`, defaulting `--kind deployment` automatically and
-   appending the new flow to the manifest’s `flows:` array with a relative path.
-
-Alias shortcuts:
-
-- `--kind deployment` and `--deployment` create the template above.
-- `--kind events` leaves you with a generic events flow.
-- `--kind messaging` is unchanged.
-
-## Informational Lints
-
-When a pack manifest declares `kind: deployment`, the scaffolder emits a
-non-blocking informational note if you still create a messaging flow. Mixed
-packs are allowed; this message is simply a reminder that deployment packs are
-expected to focus on events flows.
+3. Lets you add deployment-oriented nodes using `add-step`/`update-step` while
+   keeping routing and sidecar bindings consistent.
 
 ## Authoring Guidelines
 

@@ -2,6 +2,9 @@
 
 This CLI edits YGTc v2 flows in-place and keeps a resolve sidecar (`<flow>.ygtc.resolve.json`) up to date. Nodes use the v2 authoring shape:
 
+> Canonical guide: v0.6 behavior and terminology only.
+> Legacy compatibility details (for example hidden aliases) are documented in `docs/vision/legacy.md`.
+
 ```yaml
 nodes:
   my-node:
@@ -109,7 +112,6 @@ Sidecar expectations:
 
 Wizard mode notes:
 - `--wizard-mode` supports `default|setup|update|remove`.
-- `--wizard-mode upgrade` is accepted as a deprecated alias for `update` across 0.6.x. The CLI warns on stderr and includes a non-fatal deprecation diagnostic in JSON output.
 - `greentic-flow` does not enforce host capability permissions. Enforcement is runtime/operator-owned; this CLI only surfaces capability summaries from `describe` when available.
 
 Safety/inspection:
@@ -127,7 +129,7 @@ Requires a sidecar entry for the node; errors if missing (suggests `bind-compone
 
 Config mode reads `dev_flows.default` from the component manifest alongside the bound wasm (or cached remote component) to re-materialize the payload before applying overrides.
 - If the selected dev_flow defines questions, update-step prompts interactively for missing required values unless `--non-interactive` is set. `show_if` rules are honored.
-- Wizard mode names are `default|setup|update|remove`; `upgrade` remains a deprecated alias for `update` in 0.6.x and emits a warning.
+- Wizard mode names are `default|setup|update|remove`.
 
 ### delete-step
 Remove a node and optionally splice predecessors to its routing.
@@ -190,10 +192,10 @@ greentic-flow doctor-answers --schema answers.schema.json --answers answers.json
 - add-step/update-step/delete-step/bind-component print a summary line; flows are written unless `--dry-run`/`--validate-only`.
 - Sidecar (`*.ygtc.resolve.json`): schema_version=1; `nodes.{id}.source` contains `kind` (`local` or `remote`), `path` or `reference`, and optional `digest` when `--pin` is used.
 - doctor `--json` output matches `LintJsonOutput` (ok flag, diagnostics, bundle metadata).
-- Wizard JSON outputs include `diagnostics` when a deprecated mode alias is used (for example `upgrade -> update`).
+- Wizard JSON outputs may include `diagnostics` for non-fatal compatibility notices.
 
 ## Validation and warnings
-- Flows must be YGTc v2 (one op key per node, routing shorthand allowed). Legacy `component.exec` is accepted on read but emitted as v2.
+- Flows must be YGTc v2 (one op key per node, routing shorthand allowed).
 - add-step rejects tool/placeholder outputs, missing NEXT_NODE_PLACEHOLDER (config mode), and missing operations.
 - All write paths validate against the schema and routing rules; failures abort without writing.
 

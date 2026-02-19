@@ -5,6 +5,7 @@ use crate::{
     path_safety::normalize_under_root,
 };
 use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use serde_json::Value;
 use serde_yaml_bw::Location as YamlLocation;
 use std::{
@@ -17,10 +18,50 @@ const INLINE_SOURCE: &str = "<inline>";
 const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
 const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
 
+fn schema_file_valid(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    if text.trim().is_empty() {
+        return false;
+    }
+    serde_json::from_str::<JsonValue>(&text).is_ok()
+}
+
+fn write_schema_atomically(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "schema path has no parent"))?;
+    let unique = format!(
+        "greentic-flow-config-schema-{}.tmp-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let tmp = parent.join(unique);
+    fs::write(&tmp, EMBEDDED_SCHEMA)?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = fs::remove_file(&tmp);
+            if schema_file_valid(path) {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
 /// Ensure a temporary copy of the embedded flow schema exists and return its path.
 pub fn ensure_config_schema_path() -> io::Result<PathBuf> {
     static CONFIG_SCHEMA_PATH: OnceLock<PathBuf> = OnceLock::new();
     if let Some(path) = CONFIG_SCHEMA_PATH.get() {
+        if !schema_file_valid(path) {
+            write_schema_atomically(path)?;
+        }
         return Ok(path.clone());
     }
     let mut path = std::env::temp_dir();
@@ -31,7 +72,15 @@ pub fn ensure_config_schema_path() -> io::Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&path, EMBEDDED_SCHEMA)?;
+    if !schema_file_valid(&path) {
+        write_schema_atomically(&path)?;
+    }
+    if !schema_file_valid(&path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("schema file is invalid after write: {}", path.display()),
+        ));
+    }
     match CONFIG_SCHEMA_PATH.set(path.clone()) {
         Ok(()) => Ok(path),
         Err(_) => Ok(CONFIG_SCHEMA_PATH
