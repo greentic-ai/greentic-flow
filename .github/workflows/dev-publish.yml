@@ -11,19 +11,59 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Dynamic Patch Greentic Dependencies
         shell: bash
+        env:
+          GREENTIC_GH_ORG: ${{ github.repository_owner }}
         run: |
-          pkg_name=$(grep '^name =' Cargo.toml | head -n 1 | cut -d'"' -f2)
-          deps=$(grep -oE '^[[:space:]]*greentic-[a-zA-Z0-9-]+' Cargo.toml | tr -d ' ' | grep -v "$pkg_name" | sort -u || true)
-          if [ ! -z "$deps" ]; then
-            echo -e "\n[patch.crates-io]" >> Cargo.toml
-            for d in $deps; do
-              echo "$d = { git = 'https://github.com/greentic-ai-org/$d', branch = 'develop' }" >> Cargo.toml
-            done
-          fi
-          
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          cargo = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          package_name = cargo.get("package", {}).get("name")
+          existing_patch = set(cargo.get("patch", {}).get("crates-io", {}).keys())
+          org = os.environ["GREENTIC_GH_ORG"]
+
+          def should_patch(dep_name: str, spec):
+              if not dep_name.startswith("greentic-"):
+                  return False
+              if dep_name == package_name:
+                  return False
+              if dep_name in existing_patch:
+                  return False
+              if isinstance(spec, dict) and ("path" in spec or "git" in spec):
+                  return False
+              return True
+
+          candidates = set()
+          for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+              for dep_name, spec in cargo.get(section, {}).items():
+                  if should_patch(dep_name, spec):
+                      candidates.add(dep_name)
+
+          for dep_name, spec in cargo.get("workspace", {}).get("dependencies", {}).items():
+              if should_patch(dep_name, spec):
+                  candidates.add(dep_name)
+
+          if not candidates:
+              print("No greentic crates to patch")
+              raise SystemExit(0)
+
+          cfg = Path(".cargo/config.toml")
+          cfg.parent.mkdir(parents=True, exist_ok=True)
+
+          lines = ["[patch.crates-io]"]
+          for dep_name in sorted(candidates):
+              lines.append(f'{dep_name} = {{ git = "https://github.com/{org}/{dep_name}", branch = "develop" }}')
+
+          cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(f"Generated {cfg} with {len(candidates)} patches")
+          PY
+
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
           toolchain: 1.90.0
@@ -53,25 +93,67 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      
+        with:
+          fetch-depth: 0
+
       - name: Dynamic Patch Greentic Dependencies (bin build)
         shell: bash
+        env:
+          GREENTIC_GH_ORG: ${{ github.repository_owner }}
         run: |
-          pkg_name=$(grep '^name =' Cargo.toml | head -n 1 | cut -d'"' -f2)
-          deps=$(grep -oE '^[[:space:]]*greentic-[a-zA-Z0-9-]+' Cargo.toml | tr -d ' ' | grep -v "$pkg_name" | sort -u || true)
-          if [ ! -z "$deps" ]; then
-            echo -e "\n[patch.crates-io]" >> Cargo.toml
-            for d in $deps; do
-              echo "$d = { git = 'https://github.com/greentic-ai-org/$d', branch = 'develop' }" >> Cargo.toml
-            done
-          fi
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          cargo = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          package_name = cargo.get("package", {}).get("name")
+          existing_patch = set(cargo.get("patch", {}).get("crates-io", {}).keys())
+          org = os.environ["GREENTIC_GH_ORG"]
+
+          def should_patch(dep_name: str, spec):
+              if not dep_name.startswith("greentic-"):
+                  return False
+              if dep_name == package_name:
+                  return False
+              if dep_name in existing_patch:
+                  return False
+              if isinstance(spec, dict) and ("path" in spec or "git" in spec):
+                  return False
+              return True
+
+          candidates = set()
+          for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+              for dep_name, spec in cargo.get(section, {}).items():
+                  if should_patch(dep_name, spec):
+                      candidates.add(dep_name)
+
+          for dep_name, spec in cargo.get("workspace", {}).get("dependencies", {}).items():
+              if should_patch(dep_name, spec):
+                  candidates.add(dep_name)
+
+          if not candidates:
+              print("No greentic crates to patch")
+              raise SystemExit(0)
+
+          cfg = Path(".cargo/config.toml")
+          cfg.parent.mkdir(parents=True, exist_ok=True)
+
+          lines = ["[patch.crates-io]"]
+          for dep_name in sorted(candidates):
+              lines.append(f'{dep_name} = {{ git = "https://github.com/{org}/{dep_name}", branch = "develop" }}')
+
+          cfg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          print(f"Generated {cfg} with {len(candidates)} patches")
+          PY
 
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
           toolchain: 1.90.0
           override: true
           targets: ${{ matrix.target }}
-      
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --package greentic-flow
 
@@ -86,19 +168,20 @@ jobs:
           echo "artifact=dist/greentic-flow-${target}${bin_suffix}" >> "$GITHUB_OUTPUT"
 
       - name: Update Rolling Release
-        if: matrix.os == 'ubuntu-latest' # Only run release update once
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          git tag -fa latest-dev -m "Rolling develop tag"
+          git push origin refs/tags/latest-dev --force
           gh release delete latest-dev --yes || true
-          git tag -d latest-dev || true
-          git push origin :refs/tags/latest-dev || true
-          git tag latest-dev
-          git push origin latest-dev
-          gh release create latest-dev --prerelease --title "Development Build" --notes "Rolling release for dev."
+          gh release create latest-dev --prerelease --title "Development Build" --notes "Rolling release for dev." --target "$GITHUB_SHA"
 
       - name: Upload Binary to Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload latest-dev ${{ steps.package.outputs.artifact }} --clobber
+
