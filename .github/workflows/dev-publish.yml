@@ -13,6 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Dynamic Patch Greentic Dependencies
+        shell: bash
         run: |
           pkg_name=$(grep '^name =' Cargo.toml | head -n 1 | cut -d'"' -f2)
           deps=$(grep -oE '^[[:space:]]*greentic-[a-zA-Z0-9-]+' Cargo.toml | tr -d ' ' | grep -v "$pkg_name" | sort -u || true)
@@ -54,6 +55,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Dynamic Patch Greentic Dependencies (bin build)
+        shell: bash
         run: |
           pkg_name=$(grep '^name =' Cargo.toml | head -n 1 | cut -d'"' -f2)
           deps=$(grep -oE '^[[:space:]]*greentic-[a-zA-Z0-9-]+' Cargo.toml | tr -d ' ' | grep -v "$pkg_name" | sort -u || true)
