@@ -56,7 +56,7 @@ jobs:
           cfg = Path(".cargo/config.toml")
           cfg.parent.mkdir(parents=True, exist_ok=True)
 
-          lines = ["[patch.crates-io]"]
+          lines = ["[net]", "git-fetch-with-cli = true", "", "[patch.crates-io]"]
           for dep_name in sorted(candidates):
               lines.append(f'{dep_name} = {{ git = "https://github.com/{org}/{dep_name}", branch = "develop" }}')
 
@@ -140,7 +140,7 @@ jobs:
           cfg = Path(".cargo/config.toml")
           cfg.parent.mkdir(parents=True, exist_ok=True)
 
-          lines = ["[patch.crates-io]"]
+          lines = ["[net]", "git-fetch-with-cli = true", "", "[patch.crates-io]"]
           for dep_name in sorted(candidates):
               lines.append(f'{dep_name} = {{ git = "https://github.com/{org}/{dep_name}", branch = "develop" }}')
 
@@ -174,6 +174,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -fa latest-dev -m "Rolling develop tag"
           git push origin refs/tags/latest-dev --force
           gh release delete latest-dev --yes || true
