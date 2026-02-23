@@ -178,7 +178,9 @@ fn component_spec_to_form(spec: &ComponentQaSpec, catalog: &I18nCatalog, locale:
             id: question.id.clone(),
             kind,
             title,
+            title_i18n: None,
             description,
+            description_i18n: None,
             required: question.required,
             choices,
             default_value,
@@ -201,6 +203,7 @@ fn component_spec_to_form(spec: &ComponentQaSpec, catalog: &I18nCatalog, locale:
         secrets_policy: None,
         store: Vec::new(),
         validations: Vec::new(),
+        includes: Vec::new(),
         questions,
     }
 }

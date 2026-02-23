@@ -10,6 +10,7 @@ LOCAL_CHECK_STRICT=${LOCAL_CHECK_STRICT:-0}
 LOCAL_CHECK_VERBOSE=${LOCAL_CHECK_VERBOSE:-0}
 LOCAL_CHECK_ALLOW_SKIP=${LOCAL_CHECK_ALLOW_SKIP:-0}
 LOCAL_CHECK_RUST_MM=${LOCAL_CHECK_RUST_MM:-1.91}
+LOCAL_CHECK_SCHEMA_REF=${LOCAL_CHECK_SCHEMA_REF:-main}
 SKIPPED_REQUIRED=0
 
 if [[ "${LOCAL_CHECK_VERBOSE}" == "1" ]]; then
@@ -127,20 +128,20 @@ elif ! need curl; then
 elif ! need python3; then
   skip_step "python3 required for schema check" 1
 else
-  url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
+  url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/${LOCAL_CHECK_SCHEMA_REF}/schemas/ygtc.flow.schema.json"
   tmp_schema="$(mktemp)"
   if ! curl -sSf "${url}" -o "${tmp_schema}"; then
     skip_step "schema fetch failed (offline?). Skipping schema parity check." 0
   else
-  TMP_SCHEMA="${tmp_schema}" python3 - <<'PY'
+    TMP_SCHEMA="${tmp_schema}" python3 - <<'PY'
 import json, os, sys
 published = json.load(open(os.environ["TMP_SCHEMA"]))
 local = json.load(open("schemas/ygtc.flow.schema.json"))
 if published.get("$id") != local.get("$id"):
     raise SystemExit(f"Schema $id mismatch: remote={published.get('$id')} local={local.get('$id')}")
 PY
-  rm -f "${tmp_schema}"
   fi
+  rm -f "${tmp_schema}"
 fi
 
 if [[ "${SKIPPED_REQUIRED}" == "1" && "${LOCAL_CHECK_ALLOW_SKIP}" != "1" ]]; then
