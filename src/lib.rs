@@ -33,6 +33,7 @@ pub mod schema_validate;
 pub mod splice;
 pub mod template;
 pub mod util;
+pub mod wizard;
 pub mod wizard_ops;
 pub mod wizard_state;
 

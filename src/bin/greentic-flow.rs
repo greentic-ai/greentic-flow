@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env,
     ffi::OsStr,
     fs,
@@ -52,7 +52,7 @@ use greentic_flow::{
     resolve_summary::{remove_flow_resolve_summary_node, write_flow_resolve_summary_for_node},
     schema_mode::SchemaMode,
     schema_validate::{Severity, validate_value_against_schema},
-    wizard_ops, wizard_state,
+    wizard, wizard_ops, wizard_state,
 };
 use greentic_types::flow_resolve::{
     ComponentSourceRefV1, FLOW_RESOLVE_SCHEMA_VERSION, FlowResolveV1, NodeResolveV1, ResolveModeV1,
@@ -695,7 +695,7 @@ fn handle_wizard(
     backup: bool,
 ) -> Result<()> {
     match args.command {
-        WizardCommand::New(args) => handle_new(args, backup),
+        WizardCommand::New(args) => handle_wizard_new(args, backup),
         WizardCommand::Edit(args) => handle_update(args, backup),
         WizardCommand::AddStep(mut args) => {
             args.args.interactive = !args.non_interactive;
@@ -719,6 +719,97 @@ fn handle_wizard(
             handle_delete_step(args.args, format, backup)
         }
     }
+}
+
+fn handle_wizard_new(args: NewArgs, backup: bool) -> Result<()> {
+    let provider = wizard::wizard_provider();
+    let ctx = wizard::ProviderContext {
+        root_dir: PathBuf::new(),
+    };
+    let mut answers: HashMap<String, serde_json::Value> = HashMap::new();
+    answers.insert(
+        "flow.name".to_string(),
+        serde_json::Value::String(args.flow_id.clone()),
+    );
+    answers.insert(
+        "flow.path".to_string(),
+        serde_json::Value::String(args.flow_path.to_string_lossy().to_string()),
+    );
+    answers.insert(
+        "flow.kind".to_string(),
+        serde_json::Value::String(args.flow_type.clone()),
+    );
+    answers.insert(
+        "flow.entrypoint".to_string(),
+        serde_json::Value::String("start".to_string()),
+    );
+    answers.insert(
+        "flow.nodes.scaffold".to_string(),
+        serde_json::Value::Bool(false),
+    );
+    answers.insert(
+        "flow.nodes.variant".to_string(),
+        serde_json::Value::String("start-end".to_string()),
+    );
+    if let Some(name) = &args.name {
+        answers.insert(
+            "flow.title".to_string(),
+            serde_json::Value::String(name.clone()),
+        );
+    }
+    if let Some(description) = &args.description {
+        answers.insert(
+            "flow.description".to_string(),
+            serde_json::Value::String(description.clone()),
+        );
+    }
+
+    let plan = provider.apply(
+        wizard::MODE_NEW,
+        &ctx,
+        &answers,
+        &wizard::ApplyOptions { validate: false },
+    )?;
+    execute_wizard_new_plan(&plan, args.force, backup)?;
+    println!(
+        "Created flow '{}' at {} (type: {})",
+        args.flow_id,
+        args.flow_path.display(),
+        args.flow_type
+    );
+    Ok(())
+}
+
+fn execute_wizard_new_plan(plan: &wizard::WizardPlan, force: bool, backup: bool) -> Result<()> {
+    for step in &plan.steps {
+        match step {
+            wizard::WizardPlanStep::EnsureDir { path } => {
+                fs::create_dir_all(path)
+                    .with_context(|| format!("create scaffold directory {}", path.display()))?;
+            }
+            wizard::WizardPlanStep::WriteFile { path, content } => {
+                write_flow_file(path, content, force, backup)?;
+            }
+            wizard::WizardPlanStep::ValidateFlow { path } => {
+                let doc = load_ygtc_from_path(path)
+                    .with_context(|| format!("load scaffolded flow {}", path.display()))?;
+                let flow = greentic_flow::compile_flow(doc)
+                    .map_err(|err| anyhow!("compile scaffolded flow {}: {err}", path.display()))?;
+                let lint_errors = lint_builtin_rules(&flow);
+                if !lint_errors.is_empty() {
+                    anyhow::bail!(
+                        "scaffolded flow {} failed builtin lint: {}",
+                        path.display(),
+                        lint_errors.join("; ")
+                    );
+                }
+            }
+            wizard::WizardPlanStep::RunCommand { command, .. } => {
+                anyhow::bail!("unsupported wizard new plan step RunCommand('{command}')");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn handle_doctor(args: DoctorArgs, schema_mode: SchemaMode) -> Result<()> {

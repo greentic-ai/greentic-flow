@@ -24,7 +24,7 @@ pub struct FlowDoc {
     pub description: Option<String>,
     #[serde(rename = "type")]
     pub flow_type: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start: Option<String>,
     #[serde(default = "default_parameters")]
     pub parameters: Value,

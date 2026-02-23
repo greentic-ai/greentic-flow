@@ -57,6 +57,36 @@ fn new_writes_v2_empty_flow() {
 }
 
 #[test]
+fn wizard_new_writes_v2_empty_flow_via_provider_adapter() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg("new")
+        .arg("--flow")
+        .arg(&flow_path)
+        .arg("--id")
+        .arg("main")
+        .arg("--type")
+        .arg("messaging")
+        .arg("--name")
+        .arg("Wizard Main")
+        .arg("--description")
+        .arg("wizard flow")
+        .assert()
+        .success();
+
+    let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+    assert_eq!(doc.id, "main");
+    assert_eq!(doc.flow_type, "messaging");
+    assert_eq!(doc.schema_version, Some(2));
+    assert_eq!(doc.title.as_deref(), Some("Wizard Main"));
+    assert_eq!(doc.description.as_deref(), Some("wizard flow"));
+    assert!(doc.nodes.is_empty());
+}
+
+#[test]
 fn add_step_into_empty_flow_succeeds() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");

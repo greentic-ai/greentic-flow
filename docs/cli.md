@@ -34,6 +34,13 @@ greentic-flow new --flow flows/main.ygtc --id main --type messaging \
 
 Writes an empty `nodes: {}` skeleton. Refuses to overwrite unless `--force`.
 
+Wizard adapter:
+```
+greentic-flow wizard new --flow flows/main.ygtc --id main --type messaging \
+  [--schema-version 2] [--name "Title"] [--description "text"] [--force]
+```
+`wizard new` routes through the flow scaffold provider (`spec/apply -> plan`) and then executes the plan.
+
 ### update
 Non-destructive metadata edits (name/description/tags/id/type/schema_version).
 
