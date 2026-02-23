@@ -22,9 +22,9 @@ jobs:
       - name: Lint & Test
         run: |
           cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo build --workspace --all-features
-          cargo test --workspace --all-features -- --nocapture
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo build --locked --workspace --all-features
+          cargo test --locked --workspace --all-features -- --nocapture
 
   publish:
     name: Publish crates
