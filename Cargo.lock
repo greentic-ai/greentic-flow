@@ -2568,9 +2568,9 @@ dependencies = [
 
 [[package]]
 name = "qa-spec"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a864b45c22b03e22d7111e4cb1c48338e53ecc446e391ec77b9569a5f9522d28"
+checksum = "7d3e9e666bd6b723dd268defb98250f165be5a8ff1078b6e850e970ddd2f9b30"
 dependencies = [
  "globset",
  "handlebars",
