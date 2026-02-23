@@ -1346,6 +1346,8 @@ dependencies = [
 [[package]]
 name = "greentic-types"
 version = "0.4.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84fb5c7beacb02c0b09cefc8fee0bc31b72500580ef3bf89d94d1b842282cb1f"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1374,6 +1376,8 @@ dependencies = [
 [[package]]
 name = "greentic-types-macros"
 version = "0.4.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1205ccc1ea283587391e53ee55171609b5486834813dddb15f16437e6f7b78fe"
 dependencies = [
  "proc-macro2",
  "quote",
