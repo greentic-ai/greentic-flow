@@ -4,7 +4,9 @@ use anyhow::{Result, anyhow};
 use serde_json::Value as JsonValue;
 
 use crate::i18n::{I18nCatalog, resolve_text};
-use greentic_interfaces::canonical::node::{ComponentDescriptor, SchemaSource};
+use greentic_interfaces_host::component_v0_6::exports::greentic::component::node::{
+    ComponentDescriptor, SchemaSource,
+};
 use greentic_types::cbor::canonical;
 use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QaMode, QuestionKind};
 
@@ -64,14 +66,14 @@ pub struct WizardSpecOutput {
 #[allow(unsafe_code)]
 mod host {
     use super::*;
-    use greentic_interfaces::canonical::node as canonical_node;
+    use greentic_interfaces_host::component_v0_6::exports::greentic::component::node as canonical_node;
     use wasmtime::component::{Component, Linker};
     use wasmtime::{Config, Engine, Store, StoreContextMut};
 
     mod runtime {
-        pub use greentic_interfaces::component_v0_6::exports::greentic::component::node;
-        pub use greentic_interfaces::component_v0_6::greentic::types_core::core;
-        pub type RuntimeComponent = greentic_interfaces::component_v0_6::Component;
+        pub use greentic_interfaces_host::component_v0_6::exports::greentic::component::node;
+        pub use greentic_interfaces_host::component_v0_6::greentic::types_core::core;
+        pub type RuntimeComponent = greentic_interfaces_host::component_v0_6::ComponentV0V6V0;
     }
 
     fn build_engine() -> Result<Engine> {

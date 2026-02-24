@@ -105,29 +105,32 @@ fn derive_contract_meta(
 
 fn hash_schema_source(
     hasher: &mut Sha256,
-    source: &greentic_interfaces::canonical::node::SchemaSource,
+    source: &greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource,
 ) {
     match source {
-        greentic_interfaces::canonical::node::SchemaSource::CborSchemaId(id) => {
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::CborSchemaId(id) => {
             hasher.update([0]);
             hasher.update(id.as_bytes());
         }
-        greentic_interfaces::canonical::node::SchemaSource::InlineCbor(bytes) => {
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::InlineCbor(bytes) => {
             hasher.update([1]);
             hasher.update(bytes);
         }
-        greentic_interfaces::canonical::node::SchemaSource::RefPackPath(path) => {
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::RefPackPath(path) => {
             hasher.update([2]);
             hasher.update(path.as_bytes());
         }
-        greentic_interfaces::canonical::node::SchemaSource::RefUri(uri) => {
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::RefUri(uri) => {
             hasher.update([3]);
             hasher.update(uri.as_bytes());
         }
     }
 }
 
-fn hash_io_schema(hasher: &mut Sha256, schema: &greentic_interfaces::canonical::node::IoSchema) {
+fn hash_io_schema(
+    hasher: &mut Sha256,
+    schema: &greentic_interfaces_host::component_v0_6::exports::greentic::component::node::IoSchema,
+) {
     hash_schema_source(hasher, &schema.schema);
     hasher.update(schema.content_type.as_bytes());
     if let Some(version) = &schema.schema_version {
@@ -136,7 +139,7 @@ fn hash_io_schema(hasher: &mut Sha256, schema: &greentic_interfaces::canonical::
 }
 
 fn canonical_descriptor_hash(
-    descriptor: &greentic_interfaces::canonical::node::ComponentDescriptor,
+    descriptor: &greentic_interfaces_host::component_v0_6::exports::greentic::component::node::ComponentDescriptor,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(descriptor.name.as_bytes());
@@ -181,10 +184,10 @@ fn canonical_descriptor_hash(
         }
         for output in &setup.outputs {
             match output {
-                greentic_interfaces::canonical::node::SetupOutput::ConfigOnly => {
+                greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SetupOutput::ConfigOnly => {
                     hasher.update([4]);
                 }
-                greentic_interfaces::canonical::node::SetupOutput::TemplateScaffold(scaffold) => {
+                greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SetupOutput::TemplateScaffold(scaffold) => {
                     hasher.update([5]);
                     hasher.update(scaffold.template_ref.as_bytes());
                     if let Some(layout) = &scaffold.output_layout {
@@ -198,7 +201,7 @@ fn canonical_descriptor_hash(
 }
 
 fn derive_contract_meta_from_descriptor(
-    descriptor: &greentic_interfaces::canonical::node::ComponentDescriptor,
+    descriptor: &greentic_interfaces_host::component_v0_6::exports::greentic::component::node::ComponentDescriptor,
     operation_id: &str,
 ) -> Result<(
     Option<greentic_types::schemas::common::schema_ir::SchemaIr>,
@@ -217,7 +220,7 @@ fn derive_contract_meta_from_descriptor(
     let schema_hash = format!("{:x}", schema_hasher.finalize());
 
     let (config_schema, config_schema_cbor) = match &op.input.schema {
-        greentic_interfaces::canonical::node::SchemaSource::InlineCbor(bytes) => {
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::InlineCbor(bytes) => {
             let schema = greentic_types::cbor::canonical::from_cbor::<
                 greentic_types::schemas::common::schema_ir::SchemaIr,
             >(bytes)

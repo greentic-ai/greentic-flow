@@ -1,4 +1,6 @@
-use greentic_interfaces::canonical::node::{ComponentDescriptor, SchemaSource, SetupOutput};
+use greentic_interfaces_host::component_v0_6::exports::greentic::component::node::{
+    ComponentDescriptor, SchemaSource, SetupOutput,
+};
 
 pub fn has_setup(descriptor: &ComponentDescriptor) -> bool {
     descriptor.setup.is_some()
@@ -22,7 +24,9 @@ pub fn setup_outputs(descriptor: &ComponentDescriptor) -> Option<&[SetupOutput]>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greentic_interfaces::canonical::node::{IoSchema, Op, SchemaRef, SetupContract};
+    use greentic_interfaces_host::component_v0_6::exports::greentic::component::node::{
+        IoSchema, Op, SchemaRef, SetupContract,
+    };
 
     fn sample_descriptor() -> ComponentDescriptor {
         ComponentDescriptor {
