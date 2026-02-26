@@ -36,7 +36,7 @@ semver = "1"
 greentic-distributor-client = { version = "0.4", default-features = false, features = ["dist-client", "http-runtime"] }
 url = "2"
 wasmtime = { version = "41", features = ["component-model"] }
-qa-spec = "=0.4.2"
+qa-spec = "=0.4.5"
 
 [dev-dependencies]
 assert_cmd = "2"
