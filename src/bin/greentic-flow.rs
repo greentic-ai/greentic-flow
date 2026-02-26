@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env,
     ffi::OsStr,
     fs,
@@ -52,7 +52,7 @@ use greentic_flow::{
     resolve_summary::{remove_flow_resolve_summary_node, write_flow_resolve_summary_for_node},
     schema_mode::SchemaMode,
     schema_validate::{Severity, validate_value_against_schema},
-    wizard_ops, wizard_state,
+    wizard, wizard_ops, wizard_state,
 };
 use greentic_types::flow_resolve::{
     ComponentSourceRefV1, FLOW_RESOLVE_SCHEMA_VERSION, FlowResolveV1, NodeResolveV1, ResolveModeV1,
@@ -103,32 +103,142 @@ fn derive_contract_meta(
     Ok((describe, meta))
 }
 
-fn validate_config_schema(
-    describe: &greentic_types::schemas::component::v0_6_0::ComponentDescribe,
-    config_cbor: &[u8],
-) -> Result<()> {
-    let value: ciborium::value::Value = ciborium::de::from_reader(config_cbor)
-        .map_err(|err| anyhow!("decode config cbor: {err}"))?;
-    let diags = validate_value_against_schema(&describe.config_schema, &value);
-    let mut errors = Vec::new();
-    let mut warnings = Vec::new();
-    for diag in diags {
-        match diag.severity {
-            Severity::Error => errors.push(diag),
-            Severity::Warning => warnings.push(diag),
+fn hash_schema_source(
+    hasher: &mut Sha256,
+    source: &greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource,
+) {
+    match source {
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::CborSchemaId(id) => {
+            hasher.update([0]);
+            hasher.update(id.as_bytes());
+        }
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::InlineCbor(bytes) => {
+            hasher.update([1]);
+            hasher.update(bytes);
+        }
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::RefPackPath(path) => {
+            hasher.update([2]);
+            hasher.update(path.as_bytes());
+        }
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::RefUri(uri) => {
+            hasher.update([3]);
+            hasher.update(uri.as_bytes());
         }
     }
-    for warn in warnings {
-        eprintln!("warning: {} ({})", warn.message, warn.code);
+}
+
+fn hash_io_schema(
+    hasher: &mut Sha256,
+    schema: &greentic_interfaces_host::component_v0_6::exports::greentic::component::node::IoSchema,
+) {
+    hash_schema_source(hasher, &schema.schema);
+    hasher.update(schema.content_type.as_bytes());
+    if let Some(version) = &schema.schema_version {
+        hasher.update(version.as_bytes());
     }
-    if !errors.is_empty() {
-        let mut lines = Vec::new();
-        for err in errors {
-            lines.push(format!("{} ({})", err.message, err.code));
+}
+
+fn canonical_descriptor_hash(
+    descriptor: &greentic_interfaces_host::component_v0_6::exports::greentic::component::node::ComponentDescriptor,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(descriptor.name.as_bytes());
+    hasher.update(descriptor.version.as_bytes());
+    if let Some(summary) = &descriptor.summary {
+        hasher.update(summary.as_bytes());
+    }
+    for capability in &descriptor.capabilities {
+        hasher.update(capability.as_bytes());
+    }
+    for op in &descriptor.ops {
+        hasher.update(op.name.as_bytes());
+        if let Some(summary) = &op.summary {
+            hasher.update(summary.as_bytes());
         }
-        anyhow::bail!("config schema validation failed:\n{}", lines.join("\n"));
+        hash_io_schema(&mut hasher, &op.input);
+        hash_io_schema(&mut hasher, &op.output);
+        for example in &op.examples {
+            hasher.update(example.title.as_bytes());
+            hasher.update(&example.input_cbor);
+            hasher.update(&example.output_cbor);
+        }
     }
-    Ok(())
+    for schema in &descriptor.schemas {
+        hasher.update(schema.id.as_bytes());
+        hasher.update(schema.content_type.as_bytes());
+        hasher.update(schema.blake3_hash.as_bytes());
+        hasher.update(schema.version.as_bytes());
+        if let Some(bytes) = &schema.bytes {
+            hasher.update(bytes);
+        }
+        if let Some(uri) = &schema.uri {
+            hasher.update(uri.as_bytes());
+        }
+    }
+    if let Some(setup) = &descriptor.setup {
+        hash_schema_source(&mut hasher, &setup.qa_spec);
+        hash_schema_source(&mut hasher, &setup.answers_schema);
+        for example in &setup.examples {
+            hasher.update(example.title.as_bytes());
+            hasher.update(&example.answers_cbor);
+        }
+        for output in &setup.outputs {
+            match output {
+                greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SetupOutput::ConfigOnly => {
+                    hasher.update([4]);
+                }
+                greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SetupOutput::TemplateScaffold(scaffold) => {
+                    hasher.update([5]);
+                    hasher.update(scaffold.template_ref.as_bytes());
+                    if let Some(layout) = &scaffold.output_layout {
+                        hasher.update(layout.as_bytes());
+                    }
+                }
+            }
+        }
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn derive_contract_meta_from_descriptor(
+    descriptor: &greentic_interfaces_host::component_v0_6::exports::greentic::component::node::ComponentDescriptor,
+    operation_id: &str,
+) -> Result<(
+    Option<greentic_types::schemas::common::schema_ir::SchemaIr>,
+    flow_meta::ComponentContractMeta,
+)> {
+    let op = descriptor
+        .ops
+        .iter()
+        .find(|op| op.name == operation_id)
+        .ok_or_else(|| anyhow!("operation '{}' not found in descriptor.ops", operation_id))?;
+
+    let mut schema_hasher = Sha256::new();
+    schema_hasher.update(op.name.as_bytes());
+    hash_io_schema(&mut schema_hasher, &op.input);
+    hash_io_schema(&mut schema_hasher, &op.output);
+    let schema_hash = format!("{:x}", schema_hasher.finalize());
+
+    let (config_schema, config_schema_cbor) = match &op.input.schema {
+        greentic_interfaces_host::component_v0_6::exports::greentic::component::node::SchemaSource::InlineCbor(bytes) => {
+            let schema = greentic_types::cbor::canonical::from_cbor::<
+                greentic_types::schemas::common::schema_ir::SchemaIr,
+            >(bytes)
+            .map_err(|err| anyhow!("decode descriptor input schema cbor: {err}"))?;
+            (Some(schema), Some(bytes_to_hex(bytes)))
+        }
+        _ => (None, None),
+    };
+
+    let meta = flow_meta::ComponentContractMeta {
+        describe_hash: canonical_descriptor_hash(descriptor),
+        operation_id: operation_id.to_string(),
+        schema_hash,
+        component_version: Some(descriptor.version.clone()),
+        world: Some("greentic:component@0.6.0".to_string()),
+        config_schema_cbor,
+    };
+    Ok((config_schema, meta))
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -588,7 +698,7 @@ fn handle_wizard(
     backup: bool,
 ) -> Result<()> {
     match args.command {
-        WizardCommand::New(args) => handle_new(args, backup),
+        WizardCommand::New(args) => handle_wizard_new(args, backup),
         WizardCommand::Edit(args) => handle_update(args, backup),
         WizardCommand::AddStep(mut args) => {
             args.args.interactive = !args.non_interactive;
@@ -612,6 +722,97 @@ fn handle_wizard(
             handle_delete_step(args.args, format, backup)
         }
     }
+}
+
+fn handle_wizard_new(args: NewArgs, backup: bool) -> Result<()> {
+    let provider = wizard::wizard_provider();
+    let ctx = wizard::ProviderContext {
+        root_dir: PathBuf::new(),
+    };
+    let mut answers: HashMap<String, serde_json::Value> = HashMap::new();
+    answers.insert(
+        "flow.name".to_string(),
+        serde_json::Value::String(args.flow_id.clone()),
+    );
+    answers.insert(
+        "flow.path".to_string(),
+        serde_json::Value::String(args.flow_path.to_string_lossy().to_string()),
+    );
+    answers.insert(
+        "flow.kind".to_string(),
+        serde_json::Value::String(args.flow_type.clone()),
+    );
+    answers.insert(
+        "flow.entrypoint".to_string(),
+        serde_json::Value::String("start".to_string()),
+    );
+    answers.insert(
+        "flow.nodes.scaffold".to_string(),
+        serde_json::Value::Bool(false),
+    );
+    answers.insert(
+        "flow.nodes.variant".to_string(),
+        serde_json::Value::String("start-end".to_string()),
+    );
+    if let Some(name) = &args.name {
+        answers.insert(
+            "flow.title".to_string(),
+            serde_json::Value::String(name.clone()),
+        );
+    }
+    if let Some(description) = &args.description {
+        answers.insert(
+            "flow.description".to_string(),
+            serde_json::Value::String(description.clone()),
+        );
+    }
+
+    let plan = provider.apply(
+        wizard::MODE_NEW,
+        &ctx,
+        &answers,
+        &wizard::ApplyOptions { validate: false },
+    )?;
+    execute_wizard_new_plan(&plan, args.force, backup)?;
+    println!(
+        "Created flow '{}' at {} (type: {})",
+        args.flow_id,
+        args.flow_path.display(),
+        args.flow_type
+    );
+    Ok(())
+}
+
+fn execute_wizard_new_plan(plan: &wizard::WizardPlan, force: bool, backup: bool) -> Result<()> {
+    for step in &plan.steps {
+        match step {
+            wizard::WizardPlanStep::EnsureDir { path } => {
+                fs::create_dir_all(path)
+                    .with_context(|| format!("create scaffold directory {}", path.display()))?;
+            }
+            wizard::WizardPlanStep::WriteFile { path, content } => {
+                write_flow_file(path, content, force, backup)?;
+            }
+            wizard::WizardPlanStep::ValidateFlow { path } => {
+                let doc = load_ygtc_from_path(path)
+                    .with_context(|| format!("load scaffolded flow {}", path.display()))?;
+                let flow = greentic_flow::compile_flow(doc)
+                    .map_err(|err| anyhow!("compile scaffolded flow {}: {err}", path.display()))?;
+                let lint_errors = lint_builtin_rules(&flow);
+                if !lint_errors.is_empty() {
+                    anyhow::bail!(
+                        "scaffolded flow {} failed builtin lint: {}",
+                        path.display(),
+                        lint_errors.join("; ")
+                    );
+                }
+            }
+            wizard::WizardPlanStep::RunCommand { command, .. } => {
+                anyhow::bail!("unsupported wizard new plan step RunCommand('{command}')");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn handle_doctor(args: DoctorArgs, schema_mode: SchemaMode) -> Result<()> {
@@ -906,7 +1107,22 @@ fn validate_contracts_for_flow(flow_path: &Path, online: bool) -> Result<Vec<Con
 
         let resolved = resolve_source_to_wasm(flow_path, &node_resolve.source)?;
         let spec = wizard_ops::fetch_wizard_spec(&resolved, wizard_ops::WizardMode::Default)?;
-        let (describe, computed_meta) = derive_contract_meta(&spec.describe_cbor, &operation_id)?;
+        let (config_schema, computed_meta) = if !spec.describe_cbor.is_empty() {
+            let (describe, meta) = derive_contract_meta(&spec.describe_cbor, &operation_id)?;
+            (Some(describe.config_schema), meta)
+        } else if let Some(descriptor) = spec.descriptor.as_ref() {
+            derive_contract_meta_from_descriptor(descriptor, &operation_id)?
+        } else {
+            diags.push(ContractDiagnostic {
+                code: "FLOW_CONTRACT_SKIPPED",
+                severity: ContractSeverity::Warning,
+                message:
+                    "descriptor and describe_cbor are both unavailable; skipping contract checks"
+                        .to_string(),
+                node_id: node_id.clone(),
+            });
+            continue;
+        };
 
         if let Some(stored) = entry.get("describe_hash").and_then(|v| v.as_str())
             && stored != computed_meta.describe_hash
@@ -933,8 +1149,18 @@ fn validate_contracts_for_flow(flow_path: &Path, online: bool) -> Result<Vec<Con
         let config_cbor =
             greentic_types::cbor::canonical::to_canonical_cbor_allow_floats(&config_value)
                 .map_err(|err| anyhow!("encode config for validation: {err}"))?;
+        let Some(schema) = config_schema else {
+            diags.push(ContractDiagnostic {
+                code: "FLOW_SCHEMA_MISSING",
+                severity: ContractSeverity::Warning,
+                message: "missing inline input schema in descriptor for online validation"
+                    .to_string(),
+                node_id: node_id.clone(),
+            });
+            continue;
+        };
         let schema_diags = validate_value_against_schema(
-            &describe.config_schema,
+            &schema,
             &ciborium::de::from_reader(config_cbor.as_slice())
                 .map_err(|err| anyhow!("decode config cbor: {err}"))?,
         );
@@ -953,20 +1179,6 @@ fn validate_contracts_for_flow(flow_path: &Path, online: bool) -> Result<Vec<Con
     }
 
     Ok(diags)
-}
-
-fn existing_describe_hash(meta: &Option<serde_json::Value>, node_id: &str) -> Option<String> {
-    meta.as_ref()
-        .and_then(|root| root.as_object())
-        .and_then(|root| root.get(flow_meta::META_NAMESPACE))
-        .and_then(|value| value.as_object())
-        .and_then(|greentic| greentic.get("components"))
-        .and_then(|value| value.as_object())
-        .and_then(|components| components.get(node_id))
-        .and_then(|value| value.as_object())
-        .and_then(|entry| entry.get("describe_hash"))
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
 }
 
 fn node_payload_looks_like_component(payload: &serde_json::Value) -> bool {
@@ -1862,7 +2074,7 @@ mod tests {
         let config = extract_config_payload(&node.payload);
         assert_eq!(config.get("foo").and_then(|v| v.as_str()), Some("updated"));
 
-        handle_delete_step(
+        let remove_err = handle_delete_step(
             DeleteStepArgs {
                 component_id: None,
                 flow_path: flow_path.clone(),
@@ -1885,6 +2097,43 @@ mod tests {
                 component_version: None,
                 abi_version: None,
                 resolver: Some(resolver),
+                strategy: "splice".to_string(),
+                multi_pred: "error".to_string(),
+                assume_yes: true,
+                write: true,
+            },
+            OutputFormat::Human,
+            false,
+        )
+        .expect_err("remove mode should require explicit confirmation");
+        assert!(
+            remove_err.to_string().contains("Type REMOVE to confirm"),
+            "unexpected remove confirmation error: {remove_err}"
+        );
+
+        handle_delete_step(
+            DeleteStepArgs {
+                component_id: None,
+                flow_path: flow_path.clone(),
+                step: Some("widget".to_string()),
+                wizard_mode: None,
+                answers: None,
+                answers_file: None,
+                answers_dir: None,
+                overwrite_answers: false,
+                reask: false,
+                locale: None,
+                interactive: false,
+                component: None,
+                local_wasm: None,
+                distributor_url: None,
+                auth_token: None,
+                tenant: None,
+                env: None,
+                pack: None,
+                component_version: None,
+                abi_version: None,
+                resolver: None,
                 strategy: "splice".to_string(),
                 multi_pred: "error".to_string(),
                 assume_yes: true,
@@ -2026,7 +2275,10 @@ mod tests {
             OutputFormat::Human,
             false,
         );
-        assert!(result.is_err(), "expected drift to fail");
+        assert!(
+            result.is_ok(),
+            "canonical setup path without describe_cbor should skip hash drift checks"
+        );
     }
 
     #[test]
@@ -2377,40 +2629,6 @@ fn grouped_capabilities(caps: &[String]) -> Vec<String> {
     groups.into_iter().collect()
 }
 
-fn maybe_print_capability_summary(
-    format: OutputFormat,
-    describe: &greentic_types::schemas::component::v0_6_0::ComponentDescribe,
-) {
-    if !matches!(format, OutputFormat::Human) {
-        return;
-    }
-    let requested = grouped_capabilities(&describe.required_capabilities);
-    if !requested.is_empty() {
-        println!("requested capabilities: {}", requested.join(", "));
-    }
-    let provided = grouped_capabilities(&describe.provided_capabilities);
-    if !provided.is_empty() {
-        println!("provided capabilities: {}", provided.join(", "));
-    }
-    if std::env::var("RUST_LOG")
-        .ok()
-        .is_some_and(|v| v.contains("debug") || v.contains("trace"))
-    {
-        if !describe.required_capabilities.is_empty() {
-            println!(
-                "requested capabilities (raw): {}",
-                describe.required_capabilities.join(", ")
-            );
-        }
-        if !describe.provided_capabilities.is_empty() {
-            println!(
-                "provided capabilities (raw): {}",
-                describe.provided_capabilities.join(", ")
-            );
-        }
-    }
-}
-
 fn capability_hint_from_error(
     err: &anyhow::Error,
     describe: Option<&greentic_types::schemas::component::v0_6_0::ComponentDescribe>,
@@ -2518,6 +2736,23 @@ fn warn_unknown_keys(answers: &QuestionAnswers, questions: &[Question]) {
     if !unknown.is_empty() {
         eprintln!("warning: unknown answer keys: {}", unknown.join(", "));
     }
+}
+
+fn confirm_remove_mode(interactive: bool) -> Result<()> {
+    if !interactive {
+        anyhow::bail!("remove mode requires interactive confirmation: Type REMOVE to confirm");
+    }
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "Type REMOVE to confirm: ").context("write confirmation prompt")?;
+    stdout.flush().context("flush confirmation prompt")?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .context("read remove confirmation")?;
+    if line.trim() != "REMOVE" {
+        anyhow::bail!("remove cancelled: confirmation did not match 'REMOVE'");
+    }
+    Ok(())
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -2862,14 +3097,15 @@ fn handle_add_step(
             wizard_ops::WizardSpecOutput {
                 abi: fixture.abi,
                 describe_cbor: fixture.describe_cbor.clone(),
+                descriptor: None,
                 qa_spec_cbor: fixture.qa_spec_cbor.clone(),
+                answers_schema_cbor: None,
             }
         } else {
             wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)
                 .map_err(|err| wrap_wizard_error(err, &component_identity, "describe", None))?
         };
         let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
-        let describe_for_caps = contracts::decode_component_describe(&spec.describe_cbor).ok();
         let (catalog, locale) = default_i18n_catalog(args.locale.as_deref());
 
         let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
@@ -2880,9 +3116,6 @@ fn handle_add_step(
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
             );
-            if let Some(describe) = describe_for_caps.as_ref() {
-                maybe_print_capability_summary(format, describe);
-            }
             if args.interactive {
                 answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
             } else {
@@ -2902,21 +3135,18 @@ fn handle_add_step(
                 &current_config,
                 &answers_cbor,
             )
-            .map_err(|err| {
-                wrap_wizard_error(
-                    err,
-                    &component_identity,
-                    "apply-answers",
-                    describe_for_caps.as_ref(),
-                )
-            })?
+            .map_err(|err| wrap_wizard_error(err, &component_identity, "apply-answers", None))?
         };
         let operation_id = args.operation.clone().unwrap_or_else(|| "run".to_string());
-        let (describe, contract_meta) = derive_contract_meta(&spec.describe_cbor, &operation_id)?;
-        validate_config_schema(&describe, &config_cbor)?;
         let config_json = wizard_ops::cbor_to_json(&config_cbor)?;
 
         let operation = operation_id;
+        let contract_meta = spec
+            .descriptor
+            .as_ref()
+            .map(|descriptor| derive_contract_meta_from_descriptor(descriptor, &operation))
+            .transpose()?
+            .map(|(_, meta)| meta);
         let routing_json = routing_value
             .clone()
             .unwrap_or(serde_json::Value::Array(Vec::new()));
@@ -2949,17 +3179,6 @@ fn handle_add_step(
         let plan = plan_add_step(&flow_ir, spec_plan, &empty_catalog)
             .map_err(|diags| anyhow::anyhow!("planning failed: {:?}", diags))?;
         let inserted_id = plan.new_node.id.clone();
-        if let Some(stored) = existing_describe_hash(&flow_ir.meta, &inserted_id)
-            && stored != contract_meta.describe_hash
-            && !args.allow_contract_change
-        {
-            anyhow::bail!(
-                "describe_hash drift for node '{}': stored {} != new {} (use --allow-contract-change to override)",
-                inserted_id,
-                stored,
-                contract_meta.describe_hash
-            );
-        }
         let mut updated = apply_and_validate(&flow_ir, plan, &empty_catalog, args.allow_cycles)?;
 
         let abi_version = args
@@ -2973,7 +3192,7 @@ fn handle_add_step(
             &abi_version,
             resolved.digest.as_deref(),
             &wizard_ops::describe_exports_for_meta(spec.abi),
-            Some(&contract_meta),
+            contract_meta.as_ref(),
         );
         flow_meta::ensure_hints_empty(&mut updated.meta, &inserted_id);
 
@@ -3299,14 +3518,15 @@ fn handle_update_step(
             wizard_ops::WizardSpecOutput {
                 abi: fixture.abi,
                 describe_cbor: fixture.describe_cbor.clone(),
+                descriptor: None,
                 qa_spec_cbor: fixture.qa_spec_cbor.clone(),
+                answers_schema_cbor: None,
             }
         } else {
             wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)
                 .map_err(|err| wrap_wizard_error(err, &component_identity, "describe", None))?
         };
         let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
-        let describe_for_caps = contracts::decode_component_describe(&spec.describe_cbor).ok();
         let (catalog, locale) = default_i18n_catalog(args.locale.as_deref());
 
         let base_dir = answers_base_dir(&args.flow_path, args.answers_dir.as_deref());
@@ -3325,9 +3545,6 @@ fn handle_update_step(
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
             );
-            if let Some(describe) = describe_for_caps.as_ref() {
-                maybe_print_capability_summary(format, describe);
-            }
             if args.interactive {
                 answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
             } else {
@@ -3352,32 +3569,18 @@ fn handle_update_step(
                 &current_config,
                 &answers_cbor,
             )
-            .map_err(|err| {
-                wrap_wizard_error(
-                    err,
-                    &component_identity,
-                    "apply-answers",
-                    describe_for_caps.as_ref(),
-                )
-            })?
+            .map_err(|err| wrap_wizard_error(err, &component_identity, "apply-answers", None))?
         };
         let mut new_operation = node.operation.clone();
         if let Some(op) = args.operation.clone() {
             new_operation = op;
         }
-        let (describe, contract_meta) = derive_contract_meta(&spec.describe_cbor, &new_operation)?;
-        if let Some(stored) = existing_describe_hash(&flow_ir.meta, &step_id)
-            && stored != contract_meta.describe_hash
-            && !args.allow_contract_change
-        {
-            anyhow::bail!(
-                "describe_hash drift for node '{}': stored {} != new {} (use --allow-contract-change to override)",
-                step_id,
-                stored,
-                contract_meta.describe_hash
-            );
-        }
-        validate_config_schema(&describe, &config_cbor)?;
+        let contract_meta = spec
+            .descriptor
+            .as_ref()
+            .map(|descriptor| derive_contract_meta_from_descriptor(descriptor, &new_operation))
+            .transpose()?
+            .map(|(_, meta)| meta);
         let config_json = wizard_ops::cbor_to_json(&config_cbor)?;
         node.payload = config_json;
         node.operation = new_operation.clone();
@@ -3397,7 +3600,7 @@ fn handle_update_step(
             &abi_version,
             resolved.digest.as_deref(),
             &wizard_ops::describe_exports_for_meta(spec.abi),
-            Some(&contract_meta),
+            contract_meta.as_ref(),
         );
         flow_meta::ensure_hints_empty(&mut flow_ir.meta, &step_id);
 
@@ -3656,6 +3859,9 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
         let wizard_mode_arg = args.wizard_mode.unwrap_or(WizardModeArg::Remove);
         deprecation_diagnostic = warn_deprecated_wizard_mode(wizard_mode_arg);
         let wizard_mode = wizard_mode_arg.to_mode();
+        if matches!(wizard_mode, wizard_ops::WizardMode::Remove) {
+            confirm_remove_mode(args.interactive)?;
+        }
         let resolved = resolve_wizard_component(
             &args.flow_path,
             wizard_mode,
@@ -3674,14 +3880,15 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
             wizard_ops::WizardSpecOutput {
                 abi: fixture.abi,
                 describe_cbor: fixture.describe_cbor.clone(),
+                descriptor: None,
                 qa_spec_cbor: fixture.qa_spec_cbor.clone(),
+                answers_schema_cbor: None,
             }
         } else {
             wizard_ops::fetch_wizard_spec(&resolved.wasm_bytes, wizard_mode)
                 .map_err(|err| wrap_wizard_error(err, &component_identity, "describe", None))?
         };
         let qa_spec = wizard_ops::decode_component_qa_spec(&spec.qa_spec_cbor, wizard_mode)?;
-        let describe_for_caps = contracts::decode_component_describe(&spec.describe_cbor).ok();
         let (catalog, locale) = default_i18n_catalog(args.locale.as_deref());
 
         let base_dir = answers_base_dir(&args.flow_path, args.answers_dir.as_deref());
@@ -3700,9 +3907,6 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
             );
-            if let Some(describe) = describe_for_caps.as_ref() {
-                maybe_print_capability_summary(format, describe);
-            }
             if args.interactive {
                 answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
             } else {
@@ -3727,14 +3931,7 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
                 &current_config,
                 &answers_cbor,
             )
-            .map_err(|err| {
-                wrap_wizard_error(
-                    err,
-                    &component_identity,
-                    "apply-answers",
-                    describe_for_caps.as_ref(),
-                )
-            })?;
+            .map_err(|err| wrap_wizard_error(err, &component_identity, "apply-answers", None))?;
         }
         flow_meta::clear_component_entry(&mut flow_ir.meta, &target);
         if args.write {
@@ -4466,8 +4663,6 @@ struct FixtureIndex {
 struct FixtureComponentEntry {
     #[serde(default)]
     path: Option<String>,
-    #[serde(default)]
-    abi_version: Option<String>,
 }
 
 fn fixture_key(reference: &str) -> String {
@@ -4642,11 +4837,7 @@ fn resolve_fixture_wizard(
             fs::read(&apply_path).with_context(|| format!("read {}", apply_path.display()))?;
         let describe_cbor = fs::read(&describe_path)
             .with_context(|| format!("read {}", describe_path.display()))?;
-        let abi = match entry.abi_version.as_deref() {
-            Some("0.5.0") => wizard_ops::WizardAbi::Legacy,
-            Some(_) => wizard_ops::WizardAbi::V6,
-            None => wizard_ops::WizardAbi::V6,
-        };
+        let abi = wizard_ops::WizardAbi::V6;
         return Ok(Some(WizardFixture {
             abi,
             describe_cbor,
@@ -4707,12 +4898,9 @@ fn resolve_fixture_wizard(
         Vec::new()
     };
     let abi = if abi_path.exists() {
-        let text = fs::read_to_string(&abi_path)
+        let _ = fs::read_to_string(&abi_path)
             .with_context(|| format!("read {}", abi_path.display()))?;
-        match text.trim() {
-            "0.5.0" => wizard_ops::WizardAbi::Legacy,
-            _ => wizard_ops::WizardAbi::V6,
-        }
+        wizard_ops::WizardAbi::V6
     } else {
         wizard_ops::WizardAbi::V6
     };

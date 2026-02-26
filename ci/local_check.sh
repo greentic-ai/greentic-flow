@@ -9,6 +9,8 @@ LOCAL_CHECK_ONLINE=${LOCAL_CHECK_ONLINE:-0}
 LOCAL_CHECK_STRICT=${LOCAL_CHECK_STRICT:-0}
 LOCAL_CHECK_VERBOSE=${LOCAL_CHECK_VERBOSE:-0}
 LOCAL_CHECK_ALLOW_SKIP=${LOCAL_CHECK_ALLOW_SKIP:-0}
+LOCAL_CHECK_RUST_MM=${LOCAL_CHECK_RUST_MM:-1.91}
+LOCAL_CHECK_SCHEMA_REF=${LOCAL_CHECK_SCHEMA_REF:-main}
 SKIPPED_REQUIRED=0
 
 if [[ "${LOCAL_CHECK_VERBOSE}" == "1" ]]; then
@@ -44,20 +46,38 @@ cd "${repo_root}"
 step "Toolchain versions"
 if need rustc; then
   rustc --version
+  rustc_mm="$(rustc -V | awk '{print $2}' | cut -d. -f1,2)"
+  if [[ "${rustc_mm}" != "${LOCAL_CHECK_RUST_MM}" ]]; then
+    skip_step "rustc ${LOCAL_CHECK_RUST_MM}.x required (found $(rustc -V | awk '{print $2}'))" 1
+  fi
 else
-  skip_step "rustc not found"
+  skip_step "rustc not found" 1
 fi
 if need cargo; then
   cargo --version
 else
-  skip_step "cargo not found"
+  skip_step "cargo not found" 1
 fi
 
-step "Verify greentic-interfaces alignment"
-if [[ -x ci/check_interfaces_alignment.sh ]]; then
-  ci/check_interfaces_alignment.sh
+step "Verify canonical greentic component WIT is not vendored"
+if [[ -x ci/check_no_duplicate_canonical_wit.sh ]]; then
+  ci/check_no_duplicate_canonical_wit.sh
 else
-  skip_step "ci/check_interfaces_alignment.sh missing or not executable" 1
+  skip_step "ci/check_no_duplicate_canonical_wit.sh missing or not executable" 1
+fi
+
+step "Verify component-wizard ABI is not used in src/tests"
+if [[ -x ci/check_no_component_wizard_usage.sh ]]; then
+  ci/check_no_component_wizard_usage.sh
+else
+  skip_step "ci/check_no_component_wizard_usage.sh missing or not executable" 1
+fi
+
+step "Verify greentic_interfaces bindings::* is not used in downstream code/docs"
+if [[ -x ci/check_no_greentic_interfaces_bindings_usage.sh ]]; then
+  ci/check_no_greentic_interfaces_bindings_usage.sh
+else
+  skip_step "ci/check_no_greentic_interfaces_bindings_usage.sh missing or not executable" 1
 fi
 
 step "cargo fmt --all -- --check"
@@ -108,20 +128,20 @@ elif ! need curl; then
 elif ! need python3; then
   skip_step "python3 required for schema check" 1
 else
-  url="https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
+  url="https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/${LOCAL_CHECK_SCHEMA_REF}/schemas/ygtc.flow.schema.json"
   tmp_schema="$(mktemp)"
   if ! curl -sSf "${url}" -o "${tmp_schema}"; then
     skip_step "schema fetch failed (offline?). Skipping schema parity check." 0
   else
-  TMP_SCHEMA="${tmp_schema}" python3 - <<'PY'
+    TMP_SCHEMA="${tmp_schema}" python3 - <<'PY'
 import json, os, sys
 published = json.load(open(os.environ["TMP_SCHEMA"]))
 local = json.load(open("schemas/ygtc.flow.schema.json"))
 if published.get("$id") != local.get("$id"):
     raise SystemExit(f"Schema $id mismatch: remote={published.get('$id')} local={local.get('$id')}")
 PY
-  rm -f "${tmp_schema}"
   fi
+  rm -f "${tmp_schema}"
 fi
 
 if [[ "${SKIPPED_REQUIRED}" == "1" && "${LOCAL_CHECK_ALLOW_SKIP}" != "1" ]]; then

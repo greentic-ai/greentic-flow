@@ -1,3 +1,6 @@
+/// LEGACY / COMPAT ONLY.
+/// Do not use in runtime code.
+/// Replaced by canonical `greentic:component@0.6.0` with `describe` + `invoke("setup.apply_answers")`.
 package greentic:component-wizard-legacy@0.5.0;
 
 world component-wizard-legacy {

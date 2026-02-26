@@ -48,6 +48,11 @@ foreach ($file in $files) {
 
 # 3. Git и PR
 if ($CreatePR -and -not $DryRun) {
+    # Сначала убедимся, что мы на актуальном master
+    Write-Host "Checking out master and pulling latest changes..." -ForegroundColor Cyan
+    git checkout master
+    git pull origin master
+
     $branchName = "chore/rename-org-to-$NewOrgName"
     
     Write-Host "Creating branch $branchName..." -ForegroundColor Cyan
