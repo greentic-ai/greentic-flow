@@ -90,7 +90,7 @@ greentic-flow add-step --flow flows/main.ygtc \
   --node-id templates \
   --operation run --payload '{}' \
   --routing-out \
-  --component oci://ghcr.io/greentic-ai/components/templates:0.1.2 \
+  --component oci://ghcr.io/greenticai/components/templates:0.1.2 \
   --pin
 ```
 
@@ -146,3 +146,4 @@ Or run everything: `LOCAL_CHECK_ONLINE=1 ci/local_check.sh`
 - Every push to `master` compares the previous commit; if a crate version changed, a tag `<crate-name>-v<semver>` is created and pushed automatically.
 - The publish workflow runs on the tagged commit and attempts to publish all changed crates to crates.io using `katyo/publish-crates@v2`.
 - Publishing is idempotent: if the version already exists on crates.io, the workflow succeeds without error.
+

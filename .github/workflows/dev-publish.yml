@@ -53,7 +53,7 @@ jobs:
           import re
           import urllib.request
 
-          with urllib.request.urlopen('https://crates.io/api/v1/crates/greentic-types/versions?page=1&per_page=100') as r:
+          with urllib.request.urlopen('https://crates.io/api/v1/crates/greentic-types') as r:
               data = json.load(r)
 
           versions = []
@@ -136,3 +136,4 @@ jobs:
           ignore-unpublished-changes: true
           check-repo: false
           dry-run: false
+

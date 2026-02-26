@@ -108,7 +108,7 @@ elif ! need curl; then
 elif ! need python3; then
   skip_step "python3 required for schema check" 1
 else
-  url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
+  url="https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
   tmp_schema="$(mktemp)"
   if ! curl -sSf "${url}" -o "${tmp_schema}"; then
     skip_step "schema fetch failed (offline?). Skipping schema parity check." 0
@@ -132,3 +132,4 @@ fi
 
 echo ""
 echo "✅ local_check completed"
+
