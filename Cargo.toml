@@ -35,7 +35,7 @@ sha2 = "0.10"
 semver = "1"
 greentic-distributor-client = { version = "0.4", default-features = false, features = ["dist-client", "http-runtime"] }
 url = "2"
-wasmtime = { version = "41", features = ["component-model"] }
+wasmtime = { version = "42", features = ["component-model"] }
 qa-spec = "=0.4.2"
 
 [dev-dependencies]
