@@ -1,0 +1,14 @@
+mode: ContinuousDeployment
+branches:
+  develop:
+    regex: ^develop$
+    tag: dev
+    increment: Patch
+  master:
+    regex: ^master$
+    tag: ''
+    increment: Patch
+  main:
+    regex: ^main$
+    tag: ''
+    increment: Patch
