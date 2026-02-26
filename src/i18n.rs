@@ -1,6 +1,7 @@
 use crate::error::{FlowError, FlowErrorLocation, Result};
 use greentic_types::i18n_text::I18nText;
 use std::collections::{BTreeMap, BTreeSet};
+use unic_langid::LanguageIdentifier;
 
 #[derive(Debug, Clone, Default)]
 pub struct I18nCatalog {
@@ -24,18 +25,49 @@ impl I18nCatalog {
 }
 
 pub fn resolve_locale(explicit: Option<&str>) -> String {
-    if let Some(locale) = explicit
-        && !locale.trim().is_empty()
-    {
-        return locale.trim().to_string();
+    if let Some(locale) = normalize_locale(explicit.unwrap_or("")) {
+        return locale;
     }
-    if let Ok(env_locale) = std::env::var("GREENTIC_LOCALE") {
-        let trimmed = env_locale.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
+    if let Some(locale) = detect_env_locale() {
+        return locale;
+    }
+    if let Some(raw) = sys_locale::get_locale()
+        && let Some(locale) = normalize_locale(&raw)
+    {
+        return locale;
     }
     "en".to_string()
+}
+
+fn detect_env_locale() -> Option<String> {
+    for key in ["GREENTIC_LOCALE", "LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(value) = std::env::var(key)
+            && let Some(locale) = normalize_locale(&value)
+        {
+            return Some(locale);
+        }
+    }
+    None
+}
+
+fn normalize_locale(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("c")
+        || trimmed.eq_ignore_ascii_case("posix")
+    {
+        return None;
+    }
+    let without_encoding = trimmed.split('.').next().unwrap_or(trimmed);
+    let without_modifier = without_encoding
+        .split('@')
+        .next()
+        .unwrap_or(without_encoding);
+    let normalized = without_modifier.replace('_', "-");
+    normalized
+        .parse::<LanguageIdentifier>()
+        .ok()
+        .map(|lang| lang.to_string())
 }
 
 pub fn locale_fallback_chain(locale: &str) -> Vec<String> {
@@ -64,6 +96,25 @@ pub fn resolve_text(text: &I18nText, catalog: &I18nCatalog, locale: &str) -> Str
         }
     }
     text.fallback.clone().unwrap_or_else(|| text.key.clone())
+}
+
+pub fn resolve_cli_text(catalog: &I18nCatalog, locale: &str, key: &str, fallback: &str) -> String {
+    let text = I18nText::new(key, Some(fallback.to_string()));
+    resolve_text(&text, catalog, locale)
+}
+
+pub fn resolve_cli_template(
+    catalog: &I18nCatalog,
+    locale: &str,
+    key: &str,
+    fallback: &str,
+    args: &[&str],
+) -> String {
+    let mut out = resolve_cli_text(catalog, locale, key, fallback);
+    for arg in args {
+        out = out.replacen("{}", arg, 1);
+    }
+    out
 }
 
 pub fn resolve_keys(

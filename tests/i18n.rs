@@ -1,5 +1,13 @@
 use greentic_flow::i18n::{I18nCatalog, locale_fallback_chain, resolve_locale, resolve_text};
 use greentic_types::i18n_text::I18nText;
+use std::sync::{Mutex, OnceLock};
+
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock locale env mutex")
+}
 
 #[test]
 fn locale_chain_falls_back_to_language_and_en() {
@@ -8,19 +16,59 @@ fn locale_chain_falls_back_to_language_and_en() {
 }
 
 #[test]
-fn resolve_locale_prefers_explicit_then_env_then_en() {
+fn resolve_locale_prefers_explicit_then_env_then_system_then_en() {
+    let _guard = env_lock();
     unsafe {
         std::env::remove_var("GREENTIC_LOCALE");
+        std::env::remove_var("LC_ALL");
+        std::env::remove_var("LC_MESSAGES");
+        std::env::remove_var("LANG");
     }
     assert_eq!(resolve_locale(Some("pt-BR")), "pt-BR");
     unsafe {
-        std::env::set_var("GREENTIC_LOCALE", "fr");
+        std::env::set_var("LC_ALL", "fr_FR.UTF-8");
     }
-    assert_eq!(resolve_locale(None), "fr");
+    assert_eq!(resolve_locale(None), "fr-FR");
     unsafe {
-        std::env::remove_var("GREENTIC_LOCALE");
+        std::env::remove_var("LC_ALL");
+        std::env::set_var("LANG", "nl_NL.UTF-8");
+    }
+    assert_eq!(resolve_locale(None), "nl-NL");
+    unsafe {
+        std::env::remove_var("LANG");
     }
     assert_eq!(resolve_locale(None), "en");
+}
+
+#[test]
+fn resolve_locale_prefers_lc_all_over_other_system_vars() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::remove_var("GREENTIC_LOCALE");
+        std::env::set_var("LC_ALL", "de_DE.UTF-8");
+        std::env::set_var("LC_MESSAGES", "es_ES.UTF-8");
+        std::env::set_var("LANG", "nl_NL.UTF-8");
+    }
+    assert_eq!(resolve_locale(None), "de-DE");
+    unsafe {
+        std::env::remove_var("LC_ALL");
+        std::env::remove_var("LC_MESSAGES");
+        std::env::remove_var("LANG");
+    }
+}
+
+#[test]
+fn resolve_locale_keeps_greentic_override_for_compat() {
+    let _guard = env_lock();
+    unsafe {
+        std::env::set_var("GREENTIC_LOCALE", "es_MX.UTF-8");
+        std::env::set_var("LC_ALL", "de_DE.UTF-8");
+    }
+    assert_eq!(resolve_locale(None), "es-MX");
+    unsafe {
+        std::env::remove_var("GREENTIC_LOCALE");
+        std::env::remove_var("LC_ALL");
+    }
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     ffi::OsStr,
     fs,
@@ -37,7 +37,7 @@ use greentic_flow::{
     flow_bundle::{FlowBundle, load_and_validate_bundle_with_schema_text},
     flow_ir::FlowIr,
     flow_meta,
-    i18n::{I18nCatalog, resolve_locale},
+    i18n::{I18nCatalog, resolve_cli_text, resolve_locale},
     json_output::LintJsonOutput,
     lint::{lint_builtin_rules, lint_with_registry},
     loader::{ensure_config_schema_path, load_ygtc_from_path, load_ygtc_from_str},
@@ -251,7 +251,182 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 
 fn default_i18n_catalog(locale: Option<&str>) -> (I18nCatalog, String) {
     let locale = resolve_locale(locale);
-    (I18nCatalog::default(), locale)
+    let mut catalog = I18nCatalog::default();
+    merge_i18n_json_str(
+        &mut catalog,
+        "en",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/i18n/en.json")),
+    );
+    merge_i18n_json_file(&mut catalog, &locale);
+    if let Some((language, _)) = locale.split_once('-')
+        && !language.is_empty()
+        && language != locale
+    {
+        merge_i18n_json_file(&mut catalog, language);
+    }
+    (catalog, locale)
+}
+
+fn merge_i18n_json_file(catalog: &mut I18nCatalog, locale: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("i18n")
+        .join(format!("{locale}.json"));
+    let Ok(text) = fs::read_to_string(path) else {
+        return;
+    };
+    merge_i18n_json_str(catalog, locale, &text);
+}
+
+fn merge_i18n_json_str(catalog: &mut I18nCatalog, locale: &str, text: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    let Some(entries) = value.as_object() else {
+        return;
+    };
+    for (key, value) in entries {
+        if let Some(message) = value.as_str() {
+            catalog.insert(key.clone(), locale.to_string(), message.to_string());
+        }
+    }
+}
+
+fn cli_requested_locale() -> Option<String> {
+    let mut args = env::args();
+    while let Some(arg) = args.next() {
+        if arg == "--locale" {
+            return args.next();
+        }
+        if let Some(value) = arg.strip_prefix("--locale=")
+            && !value.trim().is_empty()
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn localized_cli_command(catalog: &I18nCatalog, locale: &str) -> clap::Command {
+    localize_help_tree(Cli::command(), catalog, locale, &[])
+}
+
+fn normalize_help_key_part(raw: &str) -> String {
+    raw.chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => ch.to_ascii_lowercase(),
+            _ => '_',
+        })
+        .collect()
+}
+
+fn help_path_key(path: &[String]) -> String {
+    if path.is_empty() {
+        "top".to_string()
+    } else {
+        path.iter()
+            .map(|seg| normalize_help_key_part(seg))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+}
+
+fn localize_help_tree(
+    mut cmd: clap::Command,
+    catalog: &I18nCatalog,
+    locale: &str,
+    path: &[String],
+) -> clap::Command {
+    let path_key = help_path_key(path);
+    if let Some(about) = cmd.get_about().map(|v| v.to_string())
+        && !about.trim().is_empty()
+    {
+        let key = format!("cli.help.command.{path_key}.about");
+        cmd = cmd.about(resolve_cli_text(catalog, locale, &key, &about));
+    }
+    if let Some(long_about) = cmd.get_long_about().map(|v| v.to_string())
+        && !long_about.trim().is_empty()
+    {
+        let key = format!("cli.help.command.{path_key}.long_about");
+        cmd = cmd.long_about(resolve_cli_text(catalog, locale, &key, &long_about));
+    }
+
+    let arg_ids: Vec<String> = cmd
+        .get_arguments()
+        .map(|arg| arg.get_id().as_str().to_string())
+        .collect();
+    for arg_id in arg_ids {
+        let arg_key = normalize_help_key_part(&arg_id);
+        cmd = cmd.mut_arg(arg_id.as_str(), |mut arg| {
+            if let Some(help) = arg.get_help().map(|v| v.to_string())
+                && !help.trim().is_empty()
+            {
+                let key = format!("cli.help.arg.{path_key}.{arg_key}.help");
+                arg = arg.help(resolve_cli_text(catalog, locale, &key, &help));
+            }
+            if let Some(long_help) = arg.get_long_help().map(|v| v.to_string())
+                && !long_help.trim().is_empty()
+            {
+                let key = format!("cli.help.arg.{path_key}.{arg_key}.long_help");
+                arg = arg.long_help(resolve_cli_text(catalog, locale, &key, &long_help));
+            }
+            arg
+        });
+    }
+
+    let sub_names: Vec<String> = cmd
+        .get_subcommands()
+        .map(|sc| sc.get_name().to_string())
+        .collect();
+    for sub_name in sub_names {
+        let mut sub_path = path.to_vec();
+        sub_path.push(sub_name.clone());
+        cmd = cmd.mut_subcommand(sub_name.as_str(), |sc| {
+            localize_help_tree(sc, catalog, locale, &sub_path)
+        });
+    }
+    cmd
+}
+
+fn collect_help_i18n_entries(
+    cmd: &clap::Command,
+    path: &[String],
+    out: &mut BTreeMap<String, String>,
+) {
+    let path_key = help_path_key(path);
+    if let Some(about) = cmd.get_about().map(|v| v.to_string())
+        && !about.trim().is_empty()
+    {
+        out.insert(format!("cli.help.command.{path_key}.about"), about);
+    }
+    if let Some(long_about) = cmd.get_long_about().map(|v| v.to_string())
+        && !long_about.trim().is_empty()
+    {
+        out.insert(
+            format!("cli.help.command.{path_key}.long_about"),
+            long_about,
+        );
+    }
+    for arg in cmd.get_arguments() {
+        let arg_key = normalize_help_key_part(arg.get_id().as_str());
+        if let Some(help) = arg.get_help().map(|v| v.to_string())
+            && !help.trim().is_empty()
+        {
+            out.insert(format!("cli.help.arg.{path_key}.{arg_key}.help"), help);
+        }
+        if let Some(long_help) = arg.get_long_help().map(|v| v.to_string())
+            && !long_help.trim().is_empty()
+        {
+            out.insert(
+                format!("cli.help.arg.{path_key}.{arg_key}.long_help"),
+                long_help,
+            );
+        }
+    }
+    for sc in cmd.get_subcommands() {
+        let mut sub_path = path.to_vec();
+        sub_path.push(sc.get_name().to_string());
+        collect_help_i18n_entries(sc, &sub_path, out);
+    }
 }
 
 fn answers_base_dir(flow_path: &Path, answers_dir: Option<&Path>) -> PathBuf {
@@ -670,7 +845,27 @@ enum AnswersMode {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    if env::args().any(|arg| arg == "--dump-help-i18n") {
+        let mut entries = BTreeMap::new();
+        collect_help_i18n_entries(&Cli::command(), &[], &mut entries);
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+    let requested_locale = cli_requested_locale();
+    let (catalog, locale) = default_i18n_catalog(requested_locale.as_deref());
+    let cmd = localized_cli_command(&catalog, &locale);
+    let matches = match cmd.try_get_matches() {
+        Ok(matches) => matches,
+        Err(err) => err.exit(),
+    };
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
+    if let Some(locale) = cli.locale.as_deref()
+        && !locale.trim().is_empty()
+    {
+        unsafe {
+            std::env::set_var("GREENTIC_LOCALE", locale.trim());
+        }
+    }
     let schema_mode = SchemaMode::resolve(cli.permissive)?;
     match cli.command {
         Commands::New(args) => handle_new(args, cli.backup),
@@ -3111,7 +3306,7 @@ fn handle_add_step(
         let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
         wizard_ops::merge_default_answers(&qa_spec, &mut answers);
         if !qa_spec.questions.is_empty() {
-            qa_runner::warn_unknown_keys(&answers, &qa_spec);
+            qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
             println!(
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
@@ -3540,7 +3735,7 @@ fn handle_update_step(
         let mut answers = parse_answers_map(args.answers.as_deref(), answers_file)?;
         wizard_ops::merge_default_answers(&qa_spec, &mut answers);
         if !qa_spec.questions.is_empty() {
-            qa_runner::warn_unknown_keys(&answers, &qa_spec);
+            qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
             println!(
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
@@ -3902,7 +4097,7 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
         let mut answers = parse_answers_map(args.answers.as_deref(), answers_file)?;
         wizard_ops::merge_default_answers(&qa_spec, &mut answers);
         if !qa_spec.questions.is_empty() {
-            qa_runner::warn_unknown_keys(&answers, &qa_spec);
+            qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
             println!(
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())

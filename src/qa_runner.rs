@@ -1,5 +1,5 @@
 use crate::error::{FlowError, FlowErrorLocation, Result};
-use crate::i18n::{I18nCatalog, resolve_text};
+use crate::i18n::{I18nCatalog, resolve_cli_template, resolve_cli_text, resolve_text};
 use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QuestionKind};
 use qa_spec::FormSpec;
 use qa_spec::spec::question::{QuestionSpec, QuestionType};
@@ -7,7 +7,12 @@ use serde_json::{Map, Number, Value};
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-pub fn warn_unknown_keys(answers: &HashMap<String, Value>, spec: &ComponentQaSpec) {
+pub fn warn_unknown_keys(
+    answers: &HashMap<String, Value>,
+    spec: &ComponentQaSpec,
+    catalog: &I18nCatalog,
+    locale: &str,
+) {
     let mut known = std::collections::BTreeSet::new();
     for question in &spec.questions {
         known.insert(question.id.as_str());
@@ -19,9 +24,16 @@ pub fn warn_unknown_keys(answers: &HashMap<String, Value>, spec: &ComponentQaSpe
         }
     }
     if !unknown.is_empty() {
+        let unknown_csv = unknown.join(", ");
         eprintln!(
-            "warning: answers include unknown keys: {}",
-            unknown.join(", ")
+            "{}",
+            resolve_cli_template(
+                catalog,
+                locale,
+                "cli.qa.warning.unknown_answers_keys",
+                "warning: answers include unknown keys: {}",
+                &[unknown_csv.as_str()],
+            )
         );
     }
 }
@@ -57,11 +69,28 @@ pub fn run_interactive(
                         println!("  {idx}. {option_label} ({})", option.value);
                         idx += 1;
                     }
-                    "Select option".to_string()
+                    resolve_cli_text(
+                        catalog,
+                        locale,
+                        "cli.qa.prompt.select_option",
+                        "Select option",
+                    )
                 }
-                QuestionKind::Bool => "Enter true/false".to_string(),
-                QuestionKind::Number => "Enter number".to_string(),
-                QuestionKind::Text => "Enter text".to_string(),
+                QuestionKind::Bool => resolve_cli_text(
+                    catalog,
+                    locale,
+                    "cli.qa.prompt.enter_true_false",
+                    "Enter true/false",
+                ),
+                QuestionKind::Number => resolve_cli_text(
+                    catalog,
+                    locale,
+                    "cli.qa.prompt.enter_number",
+                    "Enter number",
+                ),
+                QuestionKind::Text => {
+                    resolve_cli_text(catalog, locale, "cli.qa.prompt.enter_text", "Enter text")
+                }
             };
             let default = question
                 .default
@@ -72,7 +101,15 @@ pub fn run_interactive(
                 if let Some(default) = default.clone() {
                     default
                 } else if question.required {
-                    println!("This field is required.");
+                    println!(
+                        "{}",
+                        resolve_cli_text(
+                            catalog,
+                            locale,
+                            "cli.qa.required_field",
+                            "This field is required.",
+                        )
+                    );
                     continue;
                 } else {
                     Value::Null
@@ -81,7 +118,15 @@ pub fn run_interactive(
                 parse_answer(&question.kind, &raw)?
             };
             if value.is_null() && question.required {
-                println!("This field is required.");
+                println!(
+                    "{}",
+                    resolve_cli_text(
+                        catalog,
+                        locale,
+                        "cli.qa.required_field",
+                        "This field is required.",
+                    )
+                );
                 continue;
             }
             answers.insert(question.id.clone(), value);
@@ -178,7 +223,9 @@ fn component_spec_to_form(spec: &ComponentQaSpec, catalog: &I18nCatalog, locale:
             id: question.id.clone(),
             kind,
             title,
+            title_i18n: None,
             description,
+            description_i18n: None,
             required: question.required,
             choices,
             default_value,
@@ -201,6 +248,7 @@ fn component_spec_to_form(spec: &ComponentQaSpec, catalog: &I18nCatalog, locale:
         secrets_policy: None,
         store: Vec::new(),
         validations: Vec::new(),
+        includes: Vec::new(),
         questions,
     }
 }
