@@ -68,7 +68,7 @@ Public component (remote OCI):
 greentic-flow add-step --flow flows/main.ygtc \
   --node-id templates \
   --operation handle_message --payload '{"input":"hi"}' \
-  --component oci://ghcr.io/greentic-ai/components/templates:0.1.2 --pin
+  --component oci://ghcr.io/greenticai/components/templates:0.1.2 --pin
 ```
 - Sidecar records the remote reference; `--pin` resolves the tag to a digest so future builds are stable.
 - Use this when you don’t have the wasm locally or want reproducible pulls in CI.
@@ -77,7 +77,7 @@ Using dev_flows (config mode) for schema-valid payloads:
 ```
 greentic-flow add-step --flow flows/main.ygtc --mode config \
   --node-id hello-world \
-  --component oci://ghcr.io/greentic-ai/components/hello-world:latest --pin \
+  --component oci://ghcr.io/greenticai/components/hello-world:latest --pin \
   --after start
 ```
 - Runs the component’s `dev_flows.default` config to emit a StepSpec with defaults and placeholder routing.
@@ -209,3 +209,4 @@ greentic-flow doctor-answers --schema answers.schema.json --answers answers.json
 ## CI usage
 - Run `ci/local_check.sh` (or `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test`) in CI.
 - Use `greentic-flow doctor` in pipelines to enforce schema validity on committed flows.
+

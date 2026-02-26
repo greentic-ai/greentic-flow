@@ -15,7 +15,7 @@ use std::{
 };
 
 const INLINE_SOURCE: &str = "<inline>";
-const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
+const DEFAULT_SCHEMA_LABEL: &str = "https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json";
 const EMBEDDED_SCHEMA: &str = include_str!("../schemas/ygtc.flow.schema.json");
 
 fn schema_file_valid(path: &Path) -> bool {
@@ -507,3 +507,4 @@ pub(crate) fn yaml_error_location(
         FlowErrorLocation::at_path(source_label.to_string()).with_source_path(source_path)
     }
 }
+

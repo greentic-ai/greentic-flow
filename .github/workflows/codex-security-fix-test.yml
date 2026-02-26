@@ -1,0 +1,117 @@
+name: Codex Security Fix (Test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to scan and patch (test branch)"
+        required: true
+        default: "codex-security-lab"
+      max_alerts:
+        description: "Maximum open Dependabot alerts to include"
+        required: true
+        default: "20"
+
+permissions:
+  contents: write
+  pull-requests: write
+  security-events: read
+
+jobs:
+  codex-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 0
+
+      - name: Fetch open Dependabot alerts
+        id: alerts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          MAX_ALERTS: ${{ github.event.inputs.max_alerts }}
+        run: |
+          set -euo pipefail
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${OWNER}/${REPO}/dependabot/alerts?state=open&per_page=100" > all-alerts.json
+
+          jq ".[0:(${MAX_ALERTS}|tonumber)]" all-alerts.json > dependabot-alerts.json
+
+          COUNT=$(jq 'length' dependabot-alerts.json)
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+
+          echo "Found ${COUNT} open alerts"
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "No open alerts to fix."
+          fi
+
+      - name: Build Codex prompt
+        if: steps.alerts.outputs.count != '0'
+        run: |
+          set -euo pipefail
+          cat > codex-prompt.txt <<'PROMPT'
+          You are operating in a CI environment.
+
+          Task:
+          1) Analyze the Dependabot alerts listed below.
+          2) Apply minimal, safe fixes in this repository to remediate vulnerabilities.
+          3) Prefer dependency updates and lockfile refreshes; avoid unrelated refactors.
+          4) Run relevant checks for changed code (at least cargo test if dependencies changed).
+          5) If a vulnerability cannot be fixed safely, leave code unchanged for that alert and explain why in SECURITY_FIX_REPORT.md.
+          6) Write SECURITY_FIX_REPORT.md summarizing:
+             - alerts addressed,
+             - exact changes,
+             - commands run,
+             - remaining alerts and blockers.
+
+          Dependabot alerts JSON:
+          PROMPT
+
+          cat dependabot-alerts.json >> codex-prompt.txt
+
+      - name: Install Codex CLI
+        if: steps.alerts.outputs.count != '0'
+        run: npm install -g @openai/codex
+
+      - name: Run Codex remediation
+        if: steps.alerts.outputs.count != '0'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          codex exec --full-auto "$(cat codex-prompt.txt)"
+
+      - name: Commit and push fixes
+        if: steps.alerts.outputs.count != '0'
+        env:
+          BRANCH: ${{ github.event.inputs.branch }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "No changes created by Codex"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          git commit -m "chore(security): codex remediation for Dependabot alerts"
+          git push origin "HEAD:${BRANCH}"
+
+      - name: Upload remediation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-security-run
+          path: |
+            all-alerts.json
+            dependabot-alerts.json
+            codex-prompt.txt
+            SECURITY_FIX_REPORT.md
+          if-no-files-found: ignore
