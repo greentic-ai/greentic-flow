@@ -12,32 +12,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
-          toolchain: 1.90.0
+          toolchain: 1.91.0
           override: true
           components: rustfmt
       - name: rustc --version
         run: rustc --version
       - name: cargo fmt --check
         run: cargo fmt --check
-      - name: verify greentic-interfaces alignment
-        run: ci/check_interfaces_alignment.sh
+      - name: verify canonical greentic component WIT is not vendored
+        run: ci/check_no_duplicate_canonical_wit.sh
+      - name: verify component-wizard ABI is not used in src/tests
+        run: ci/check_no_component_wizard_usage.sh
+      - name: verify greentic_interfaces bindings::* is not used in downstream code/docs
+        run: ci/check_no_greentic_interfaces_bindings_usage.sh
 
   clippy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
-          toolchain: 1.90.0
+          toolchain: 1.91.0
           override: true
           components: clippy
       - name: rustc --version
         run: rustc --version
       - uses: Swatinem/rust-cache@v2
-      - name: verify greentic-interfaces alignment
-        run: ci/check_interfaces_alignment.sh
+      - name: verify canonical greentic component WIT is not vendored
+        run: ci/check_no_duplicate_canonical_wit.sh
+      - name: verify component-wizard ABI is not used in src/tests
+        run: ci/check_no_component_wizard_usage.sh
+      - name: verify greentic_interfaces bindings::* is not used in downstream code/docs
+        run: ci/check_no_greentic_interfaces_bindings_usage.sh
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -45,15 +53,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
-          toolchain: 1.90.0
+          toolchain: 1.91.0
           override: true
       - name: rustc --version
         run: rustc --version
       - uses: Swatinem/rust-cache@v2
-      - name: verify greentic-interfaces alignment
-        run: ci/check_interfaces_alignment.sh
+      - name: verify canonical greentic component WIT is not vendored
+        run: ci/check_no_duplicate_canonical_wit.sh
+      - name: verify component-wizard ABI is not used in src/tests
+        run: ci/check_no_component_wizard_usage.sh
+      - name: verify greentic_interfaces bindings::* is not used in downstream code/docs
+        run: ci/check_no_greentic_interfaces_bindings_usage.sh
       - name: cargo test
         run: cargo test --all-features
       - name: greentic-flow doctor --json smoke

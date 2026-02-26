@@ -1,0 +1,17 @@
+src/wizard_ops.rs
+src/component_setup.rs
+src/bin/greentic-flow.rs
+src/lib.rs
+src/qa_runner.rs
+ci/check_no_component_wizard_usage.sh
+ci/local_check.sh
+.github/workflows/rust-ci.yml
+wit/legacy/component-wizard-v0_6.wit
+wit/legacy/component-wizard-legacy.wit
+docs/vision/README.md
+docs/vision/v0_6.md
+docs/vision/legacy.md
+docs/vision/codex.md
+docs/README.md
+README.md
+.codex/PR-01-FLOW-WIZARD.md

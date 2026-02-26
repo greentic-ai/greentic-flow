@@ -104,8 +104,8 @@ fn extract_routing(node: &Mapping, node_id: &str) -> Result<Vec<YamlValue>> {
 
 fn to_route_list(value: YamlValue, node_id: &str) -> Result<Vec<YamlValue>> {
     match value {
-        YamlValue::Sequence(seq) => Ok(seq),
-        YamlValue::Null => Ok(Vec::new()),
+        YamlValue::Sequence(seq) => Ok(seq.elements),
+        YamlValue::Null(_) => Ok(Vec::new()),
         _other => Err(FlowError::Routing {
             node_id: node_id.to_string(),
             message: "routing must be an array".to_string(),
@@ -149,9 +149,12 @@ fn route_to(node_id: &str) -> YamlValue {
 }
 
 fn yaml_string(value: &str) -> YamlValue {
-    YamlValue::String(value.to_string())
+    YamlValue::String(value.to_string(), None)
 }
 
 fn yaml_sequence(elements: Vec<YamlValue>) -> YamlValue {
-    YamlValue::Sequence(Sequence::from(elements))
+    YamlValue::Sequence(Sequence {
+        anchor: None,
+        elements,
+    })
 }

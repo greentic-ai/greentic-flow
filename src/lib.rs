@@ -8,6 +8,7 @@ pub mod add_step;
 pub mod answers;
 pub mod component_catalog;
 pub mod component_schema;
+pub mod component_setup;
 pub mod config_flow;
 pub mod contracts;
 pub mod error;
@@ -32,6 +33,7 @@ pub mod schema_validate;
 pub mod splice;
 pub mod template;
 pub mod util;
+pub mod wizard;
 pub mod wizard_ops;
 pub mod wizard_state;
 

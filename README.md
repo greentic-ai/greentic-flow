@@ -2,6 +2,8 @@
 
 Human-friendly YGTc v2 flow authoring: create flows, add component steps, keep routing safe, and validate everything with one CLI.
 
+Canonical docs in this repository track the v0.6 model. For historical compatibility notes, use `docs/vision/legacy.md`.
+
 ## Why flows?
 - **Readable YAML**: node key = node name, one operation key inside, routing shorthand (`out|reply|[...]`).
 - **Component-free authoring**: flows stay human; component sources live in a sidecar resolve file.
@@ -103,10 +105,10 @@ The sidecar records the remote reference and resolved digest (`--pin`). Perfect 
   - Removes `mid` and splices predecessors to the deleted node’s targets; removes the sidecar entry too.
 
 ## Wizard and Capability Boundaries
-- `greentic-flow` orchestrates wizard calls (`describe -> qa-spec -> apply-answers`) and flow/sidecar updates.
+- `greentic-flow` orchestrates canonical setup via `describe()` + `invoke("setup.apply_answers")` and flow/sidecar updates.
 - Capability gating is enforced by the runtime/operator host, not by `greentic-flow`.
 - Wizard summaries can display requested/provided capability groups from component `describe` output for operator visibility.
-- Wizard mode is `default|setup|update|remove`; legacy `upgrade` is still accepted as a deprecated alias across 0.6.x and will be removed in a future release.
+- Wizard mode is `default|setup|update|remove`.
 
 ## Validate flows (CI & local)
 
@@ -118,10 +120,12 @@ greentic-flow doctor --json flows/main.ygtc   # machine-readable
 Uses the embedded `schemas/ygtc.flow.schema.json` by default; add `--registry <adapter_catalog.json>` for adapter linting.
 
 ## Deep dives
+- Docs index: [`docs/README.md`](docs/README.md)
 - CLI details and routing flags: [`docs/cli.md`](docs/cli.md)
 - Add-step design and routing rules: [`docs/add_step_design.md`](docs/add_step_design.md)
 - Deployment flows: [`docs/deployment-flows.md`](docs/deployment-flows.md)
 - Config flow execution: [`docs/add_step_design.md`](docs/add_step_design.md#config-mode)
+- Vision and legacy compatibility: [`docs/vision/README.md`](docs/vision/README.md)
 
 ## Development
 - `cargo fmt --check`
