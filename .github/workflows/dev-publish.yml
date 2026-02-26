@@ -29,6 +29,12 @@ jobs:
           mkdir -p .cargo
           cp ci/dev-cargo-config.toml .cargo/config.toml
 
+      - name: Configure Git authentication
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          git config --global url."https://${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
       - name: Lint & Test
         run: |
           ci/check_interfaces_alignment.sh

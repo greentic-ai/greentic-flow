@@ -1,3 +1,6 @@
+[net]
+git-fetch-with-cli = true
+
 [patch.crates-io]
 greentic-types = { git = "https://github.com/greenticai/greentic-types", branch = "develop" }
 greentic-interfaces = { git = "https://github.com/greenticai/greentic-interfaces", branch = "develop" }
