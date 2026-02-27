@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.91"
 license = "MIT"
 description = "Generic YGTC flow schema/loader/IR for self-describing component nodes."
-repository = "https://github.com/greentic-ai/greentic-flow"
+repository = "https://github.com/greenticai/greentic-flow"
 
 [features]
 default = []
@@ -49,3 +49,4 @@ predicates = "3"
 pretty_assertions = "1"
 insta = "1"
 tempfile = "3"
+
