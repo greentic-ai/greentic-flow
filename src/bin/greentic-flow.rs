@@ -4768,10 +4768,10 @@ nodes: {}
         super::wizard_edit_flow_summary_with_io(&flow_path, &mut input, &mut output)
             .expect("summary view");
         let rendered = String::from_utf8(output).expect("utf8");
-        assert!(rendered.contains("Current name/title: Best flow title"));
-        assert!(rendered.contains("Current description: The best flow ever"));
-        assert!(!rendered.contains("Current name/title: i18n:flow.misc.title"));
-        assert!(!rendered.contains("Current description: i18n:flow.misc.description"));
+        assert!(rendered.contains("Best flow title"));
+        assert!(rendered.contains("The best flow ever"));
+        assert!(!rendered.contains("i18n:flow.misc.title"));
+        assert!(!rendered.contains("i18n:flow.misc.description"));
     }
 
     #[test]
