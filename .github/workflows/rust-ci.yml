@@ -74,7 +74,7 @@ jobs:
           ./target/debug/greentic-flow doctor --json tests/data/flow_ok.ygtc | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data.get("ok") is True, data'
       - name: verify published schema $id
         run: |
-          url="https://raw.githubusercontent.com/greentic-ai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
+          url="https://raw.githubusercontent.com/greenticai/greentic-flow/refs/heads/master/schemas/ygtc.flow.schema.json"
           curl -sSf "$url" -o /tmp/published-schema.json
           python - <<'PY'
           import json
@@ -83,3 +83,4 @@ jobs:
           if published.get("$id") != local.get("$id"):
               raise SystemExit(f"schema $id mismatch: remote={published.get('$id')} local={local.get('$id')}")
           PY
+
