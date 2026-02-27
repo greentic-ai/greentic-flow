@@ -2261,8 +2261,13 @@ fn read_pack_translation(flow_path: &Path, key: &str) -> Option<String> {
     let i18n_dir = pack_root.join("i18n");
     for filename in pack_i18n_candidate_files() {
         let path = i18n_dir.join(filename);
-        let text = fs::read_to_string(path).ok()?;
-        let map = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text).ok()?;
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+        else {
+            continue;
+        };
         if let Some(value) = map.get(key).and_then(serde_json::Value::as_str) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
