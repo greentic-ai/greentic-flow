@@ -39,6 +39,9 @@ wasmtime = { version = "42", features = ["component-model"] }
 qa-spec = "0.4"
 sys-locale = "0.3"
 unic-langid = "0.9"
+include_dir = "0.7"
+greentic-i18n-translator = { path = "../greentic-i18n/crates/greentic-i18n-translator", version = "0.4.6" }
+greentic-qa-lib = { path = "../greentic-qa/crates/qa-lib" }
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -1,6 +1,6 @@
 id: weather_bot
-title: Weather via Messaging
-description: Ask for a city, call Weather API, reply with a multi-day text template, then end.
+title: i18n:flow.weather_bot.title
+description: i18n:flow.weather_bot.description
 type: messaging
 
 parameters:

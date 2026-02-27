@@ -1,0 +1,234 @@
+PR-FLOW wizard roadmap (updated from product answers)
+
+PR-FLOW-01: Fix duplicate `--non-interactive` panic
+
+Unchanged, keep it surgical.
+
+Changes
+- Remove duplicated clap arg `--non-interactive` from either wrapper or flattened args struct.
+- Add a help-render smoke test.
+
+Acceptance
+- `cargo run --bin greentic-flow -- wizard update-step --help` exits cleanly (no panic).
+
+---
+
+PR-FLOW-02: Introduce menu wizard as a QA-driven conversation (greentic-qa-lib)
+
+Goal
+- Implement interactive Main Menu / Back / Main Menu navigation using `greentic-qa-lib` as the conversation engine.
+- Do not build a custom wizard state machine framework.
+
+Approach
+- Treat each screen as a QA form rendered by `greentic-qa-lib`.
+  - Main Menu question: select action.
+  - Flows list question: select flow (dynamic choices).
+  - Flow operations question: select operation.
+- Keep transitions as a small loop:
+  1. Build QA spec for current screen.
+  2. Run qa-lib to collect answer.
+  3. Transition to next screen.
+
+Navigation consistency
+- Main Menu only: `0) Exit`
+- Everywhere else: `0) Back`, `M) Main Menu`
+- Encode these as choice values in QA spec.
+
+Acceptance
+- `greentic-flow wizard <pack>` starts a QA-driven menu conversation.
+- `0` / `M` navigation works reliably.
+
+CLI scope lock
+- `greentic-flow wizard <pack>` is the only wizard entrypoint.
+- Remove legacy wizard subcommands/surfaces (for example `wizard new`, `wizard add-step`, `wizard update-step`, `wizard remove-step`) once menu flow is in place.
+
+Tests
+- Menu navigation test by feeding answers programmatically into qa-lib runner (no TTY required).
+
+---
+
+PR-FLOW-03: Wizard strings are all i18n keys resolved by greentic-i18n (bundles shipped in binary)
+
+Goal
+- Wizard output is fully i18n-tagged via `greentic-i18n`.
+- Wizard bundles ship with binary.
+
+Changes
+- Add embedded wizard bundles:
+  - `i18n/wizard/en-GB.json` (baseline)
+  - optional locale stubs
+- Menu QA specs use i18n keys, not raw literals:
+  - question titles, choices, help, confirmations, errors.
+- Add tiny adapter:
+  - `GreenticI18nResolver` wrapping `greentic-i18n` APIs for QA rendering.
+- Ensure qa-lib rendering uses resolved strings (or keys + resolver if qa-lib supports it).
+
+Important
+- No homegrown translator facade.
+- Only: load bundle -> resolve via `greentic-i18n`.
+
+Acceptance
+- Menu wizard displays localized strings from embedded `en-GB`.
+- No raw hardcoded English for wizard UI.
+
+Tests
+- i18n smoke: render main menu in `en-GB` and assert no missing-key markers.
+
+---
+
+PR-FLOW-04: Add flow (QA-driven) + enforced directory structure + `.ygtc` + `messaging/events` only
+
+Goal
+- Implement Add Flow with qa-lib under `./flows`.
+
+Changes
+- AddFlow QA spec:
+  - scope
+  - tenant/team
+  - type
+  - name
+- Create path:
+  - global vs tenant/team structure
+  - enforce `.ygtc` extension
+  - allow only `messaging`/`events`.
+- Store flow summary as i18n tags (key references), not raw strings.
+
+Acceptance
+- Correct path and file created.
+- No unsupported flow types.
+
+Tests
+- Path creation tests in temp directory.
+
+---
+
+PR-FLOW-05: Add/Update step with component selection (QA-driven) + reuse greentic-qa-lib for component questions
+
+Goal
+- Implement Add/Update step behavior with existing mutation logic, QA-driven interaction.
+
+Changes
+- Component source selection:
+  - Local wasm (`./components` or full path): copy + auto-pin.
+  - Remote ref (`oci://`, `repo://`, `store://`): resolve via `greentic-distributor-client`; ask pin yes/no.
+- Setup mode choices:
+  - Default
+  - Personalised
+  - remove update/remove setup modes from wizard UX.
+- Component questions always via `greentic-qa-lib` using component question flow.
+- For Default setup: filter existing QA spec to required-without-default questions.
+
+Acceptance
+- Add step works interactively with component Q/A.
+- No distributor infrastructure questions shown.
+
+Tests
+- Local component flow with autopin.
+- Remote ref flow with fixture/stub resolver.
+
+---
+
+PR-FLOW-06: Answers output prompt simplification (QA) + `--dry-run` + `--answers-file` automation
+
+Goal
+- Single answers-path question and non-interactive automation.
+
+Changes
+- One QA question:
+  - `Where should answers be written? [./answers.json]:`
+- Wire automation:
+  - `--answers-file <path>` for no-prompt path.
+  - `--dry-run` does not write flow changes; answers-file behavior documented and consistent.
+- Reuse existing answer artifact mechanisms; no new format.
+
+Acceptance
+- Enter selects default `./answers.json`.
+- Custom path works.
+- `--answers-file` runs without prompts.
+- `--dry-run` validates/doctor in memory.
+
+Tests
+- Default-path enter.
+- Custom-path answer.
+- dry-run does not mutate flow file.
+
+---
+
+PR-FLOW-07: Delete step simplification (QA-driven) — no strategy prompt
+
+Goal
+- Delete step uses existing default safe behavior with no strategy UX.
+
+Changes
+- Wizard delete flow:
+  - select step
+  - invoke remove/delete with default behavior
+  - no strategy / multi-predecessor prompt surface in wizard.
+
+Acceptance
+- Step removed successfully.
+- Wizard shows result.
+- Save runs doctor.
+
+Tests
+- Delete step flow.
+
+---
+
+PR-FLOW-08: Save runs doctor + dirty tracking (QA-driven)
+
+Goal
+- Wizard mutations are staged and saved explicitly.
+
+Changes
+- Track pending mutations in memory (dirty state).
+- Persist only on Save.
+- Save runs doctor.
+- On doctor failure:
+  - show localized diagnostic
+  - remain in flow menu.
+
+Acceptance
+- Add/update/delete marks flow dirty.
+- Save runs doctor and blocks write on failure.
+
+Tests
+- Dirty-flag behavior tests.
+- Doctor-failure keeps user in menu.
+
+---
+
+PR-FLOW-09: Generate translations (all-or-nothing) + i18n-tags-only lint in doctor
+
+Goal
+- Translation generation is pack-wide.
+- i18n-capable fields enforce i18n tags.
+
+Changes
+- Wizard menu option:
+  - ask locales
+  - generate translations for all flows only.
+- Use `greentic-i18n-translator` for automatic translation generation.
+- Extend doctor lint (strict):
+  - fail on raw literals in i18n-capable fields.
+- Wizard summary editing:
+  - store i18n keys in flow
+  - ensure keys exist in pack translation source or generated bundle.
+
+Acceptance
+- Generate translations is pack-wide only.
+- Doctor fails on raw literals in i18n-only fields.
+
+Tests
+- Doctor i18n-only lint tests.
+- Pack-wide translation generation test.
+
+---
+
+Key decisions captured
+- No custom wizard framework: menu flow uses `greentic-qa-lib` screens/answers.
+- No custom i18n facade: resolve keys with `greentic-i18n`.
+- Any UI glue is minimal and limited to:
+  - running qa-lib screens
+  - resolving i18n keys
+  - stdin/stdout IO.

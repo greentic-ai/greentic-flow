@@ -1,5 +1,7 @@
+use assert_cmd::cargo::cargo_bin_cmd;
 use greentic_flow::i18n::{I18nCatalog, locale_fallback_chain, resolve_locale, resolve_text};
 use greentic_types::i18n_text::I18nText;
+use predicates::str::contains;
 use std::sync::{Mutex, OnceLock};
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -85,4 +87,15 @@ fn resolve_text_prefers_catalog_then_fallback_then_key() {
 
     let text = I18nText::new("missing2", None);
     assert_eq!(resolve_text(&text, &catalog, "nl-NL"), "missing2");
+}
+
+#[test]
+fn cli_help_uses_requested_non_english_locale() {
+    cargo_bin_cmd!("greentic-flow")
+        .arg("--locale")
+        .arg("es")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("Ayudantes de andamiaje de flujos"));
 }

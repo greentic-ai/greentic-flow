@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use include_dir::{Dir, include_dir};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env,
@@ -7,12 +8,15 @@ use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
 const EMBEDDED_FLOW_SCHEMA: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/schemas/ygtc.flow.schema.json"
 ));
+const EMBEDDED_I18N_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/i18n");
+const EMBEDDED_WIZARD_I18N_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/i18n/wizard");
 
 use greentic_distributor_client::{
     DistClient, DistributorClient, DistributorClientConfig, DistributorEnvironmentId, EnvId,
@@ -52,12 +56,16 @@ use greentic_flow::{
     resolve_summary::{remove_flow_resolve_summary_node, write_flow_resolve_summary_for_node},
     schema_mode::SchemaMode,
     schema_validate::{Severity, validate_value_against_schema},
-    wizard, wizard_ops, wizard_state,
+    wizard_ops, wizard_state,
+};
+use greentic_qa_lib::{
+    I18nConfig as QaI18nConfig, WizardDriver, WizardFrontend, WizardRunConfig as QaWizardRunConfig,
 };
 use greentic_types::flow_resolve::{
     ComponentSourceRefV1, FLOW_RESOLVE_SCHEMA_VERSION, FlowResolveV1, NodeResolveV1, ResolveModeV1,
     read_flow_resolve, sidecar_path_for_flow, write_flow_resolve,
 };
+use greentic_types::schemas::component::v0_6_0::{ComponentQaSpec, QuestionKind};
 use indexmap::IndexMap;
 use jsonschema::error::ValidationErrorKind;
 use jsonschema::{Draft, ReferencingError};
@@ -252,29 +260,26 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 fn default_i18n_catalog(locale: Option<&str>) -> (I18nCatalog, String) {
     let locale = resolve_locale(locale);
     let mut catalog = I18nCatalog::default();
-    merge_i18n_json_str(
-        &mut catalog,
-        "en",
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/i18n/en.json")),
-    );
-    merge_i18n_json_file(&mut catalog, &locale);
+    merge_i18n_json_embedded(&mut catalog, "en");
+    merge_i18n_json_embedded(&mut catalog, &locale);
     if let Some((language, _)) = locale.split_once('-')
         && !language.is_empty()
         && language != locale
     {
-        merge_i18n_json_file(&mut catalog, language);
+        merge_i18n_json_embedded(&mut catalog, language);
     }
     (catalog, locale)
 }
 
-fn merge_i18n_json_file(catalog: &mut I18nCatalog, locale: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("i18n")
-        .join(format!("{locale}.json"));
-    let Ok(text) = fs::read_to_string(path) else {
+fn merge_i18n_json_embedded(catalog: &mut I18nCatalog, locale: &str) {
+    let file_name = format!("{locale}.json");
+    let Some(file) = EMBEDDED_I18N_DIR.get_file(&file_name) else {
         return;
     };
-    merge_i18n_json_str(catalog, locale, &text);
+    let Some(text) = file.contents_utf8() else {
+        return;
+    };
+    merge_i18n_json_str(catalog, locale, text);
 }
 
 fn merge_i18n_json_str(catalog: &mut I18nCatalog, locale: &str, text: &str) {
@@ -506,49 +511,20 @@ enum Commands {
 
 #[derive(Args, Debug)]
 struct WizardArgs {
-    #[command(subcommand)]
-    command: WizardCommand,
+    /// Pack root directory.
+    pack: PathBuf,
+    /// Write wizard answers to a JSON file without prompting.
+    #[arg(long = "answers-file")]
+    answers_file: Option<PathBuf>,
+    /// Validate and run doctor, but do not persist flow mutations.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
 }
 
-#[derive(Subcommand, Debug)]
-enum WizardCommand {
-    /// Create a new flow skeleton.
-    New(NewArgs),
-    /// Update flow metadata in-place without overwriting nodes.
-    Edit(UpdateArgs),
-    /// Insert a step after an anchor node (wizard mode).
-    AddStep(WizardAddStepArgs),
-    /// Update an existing node (wizard mode).
-    UpdateStep(WizardUpdateStepArgs),
-    /// Delete a node and optionally splice routing (wizard mode).
-    RemoveStep(WizardRemoveStepArgs),
-}
-
-#[derive(Args, Debug)]
-struct WizardAddStepArgs {
-    #[command(flatten)]
-    args: AddStepArgs,
-    /// Disable interactive prompts (requires provided answers).
-    #[arg(long = "non-interactive")]
-    non_interactive: bool,
-}
-
-#[derive(Args, Debug)]
-struct WizardUpdateStepArgs {
-    #[command(flatten)]
-    args: UpdateStepArgs,
-    /// Disable interactive prompts (requires provided answers).
-    #[arg(long = "non-interactive")]
-    non_interactive: bool,
-}
-
-#[derive(Args, Debug)]
-struct WizardRemoveStepArgs {
-    #[command(flatten)]
-    args: DeleteStepArgs,
-    /// Disable interactive prompts (requires provided answers).
-    #[arg(long = "non-interactive")]
-    non_interactive: bool,
+#[derive(Debug, Clone, Default)]
+struct WizardRunConfig {
+    answers_file: Option<PathBuf>,
+    dry_run: bool,
 }
 
 #[derive(Args, Debug)]
@@ -882,132 +858,2446 @@ fn main() -> Result<()> {
         Commands::DoctorAnswers(args) => handle_doctor_answers(args),
         Commands::Answers(args) => handle_answers(args, schema_mode),
         Commands::BindComponent(args) => handle_bind_component(args),
-        Commands::Wizard(args) => handle_wizard(args, schema_mode, cli.format, cli.backup),
+        Commands::Wizard(args) => handle_wizard(args),
     }
 }
 
-fn handle_wizard(
-    args: WizardArgs,
-    schema_mode: SchemaMode,
-    format: OutputFormat,
-    backup: bool,
+fn handle_wizard(args: WizardArgs) -> Result<()> {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+    run_wizard_menu_with_config(
+        &args.pack,
+        stdin.lock(),
+        stdout.lock(),
+        WizardRunConfig {
+            answers_file: args.answers_file,
+            dry_run: args.dry_run,
+        },
+    )
+}
+
+#[derive(Debug, Clone)]
+enum WizardScreen {
+    MainMenu,
+    FlowSelect,
+    FlowOps { flow_path: PathBuf },
+}
+
+#[derive(Debug)]
+struct WizardSession {
+    real_pack_dir: PathBuf,
+    staged_pack_dir: PathBuf,
+    dirty: bool,
+    config: WizardRunConfig,
+    answers_log: serde_json::Map<String, serde_json::Value>,
+    answers_output_path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+fn run_wizard_menu_with_io<R: Read, W: Write>(
+    pack_dir: &Path,
+    mut reader: R,
+    mut writer: W,
 ) -> Result<()> {
-    match args.command {
-        WizardCommand::New(args) => handle_wizard_new(args, backup),
-        WizardCommand::Edit(args) => handle_update(args, backup),
-        WizardCommand::AddStep(mut args) => {
-            args.args.interactive = !args.non_interactive;
-            if args.args.wizard_mode.is_none() {
-                args.args.wizard_mode = Some(WizardModeArg::Default);
-            }
-            handle_add_step(args.args, schema_mode, format, backup)
-        }
-        WizardCommand::UpdateStep(mut args) => {
-            args.args.interactive = !args.non_interactive;
-            if args.args.wizard_mode.is_none() {
-                args.args.wizard_mode = Some(WizardModeArg::Update);
-            }
-            handle_update_step(args.args, schema_mode, format, backup)
-        }
-        WizardCommand::RemoveStep(mut args) => {
-            args.args.interactive = !args.non_interactive;
-            if args.args.wizard_mode.is_none() {
-                args.args.wizard_mode = Some(WizardModeArg::Remove);
-            }
-            handle_delete_step(args.args, format, backup)
-        }
-    }
+    run_wizard_menu_with_config(
+        pack_dir,
+        &mut reader,
+        &mut writer,
+        WizardRunConfig::default(),
+    )
 }
 
-fn handle_wizard_new(args: NewArgs, backup: bool) -> Result<()> {
-    let provider = wizard::wizard_provider();
-    let ctx = wizard::ProviderContext {
-        root_dir: PathBuf::new(),
+fn run_wizard_menu_with_config<R: Read, W: Write>(
+    pack_dir: &Path,
+    mut reader: R,
+    mut writer: W,
+    config: WizardRunConfig,
+) -> Result<()> {
+    let staged_pack_dir = create_wizard_staging_pack(pack_dir)?;
+    let mut session = WizardSession {
+        real_pack_dir: pack_dir.to_path_buf(),
+        staged_pack_dir,
+        dirty: false,
+        config,
+        answers_log: serde_json::Map::new(),
+        answers_output_path: None,
     };
-    let mut answers: HashMap<String, serde_json::Value> = HashMap::new();
-    answers.insert(
-        "flow.name".to_string(),
-        serde_json::Value::String(args.flow_id.clone()),
-    );
-    answers.insert(
-        "flow.path".to_string(),
-        serde_json::Value::String(args.flow_path.to_string_lossy().to_string()),
-    );
-    answers.insert(
-        "flow.kind".to_string(),
-        serde_json::Value::String(args.flow_type.clone()),
-    );
-    answers.insert(
-        "flow.entrypoint".to_string(),
-        serde_json::Value::String("start".to_string()),
-    );
-    answers.insert(
-        "flow.nodes.scaffold".to_string(),
-        serde_json::Value::Bool(false),
-    );
-    answers.insert(
-        "flow.nodes.variant".to_string(),
-        serde_json::Value::String("start-end".to_string()),
-    );
-    if let Some(name) = &args.name {
-        answers.insert(
-            "flow.title".to_string(),
-            serde_json::Value::String(name.clone()),
-        );
-    }
-    if let Some(description) = &args.description {
-        answers.insert(
-            "flow.description".to_string(),
-            serde_json::Value::String(description.clone()),
-        );
-    }
-
-    let plan = provider.apply(
-        wizard::MODE_NEW,
-        &ctx,
-        &answers,
-        &wizard::ApplyOptions { validate: false },
-    )?;
-    execute_wizard_new_plan(&plan, args.force, backup)?;
-    println!(
-        "Created flow '{}' at {} (type: {})",
-        args.flow_id,
-        args.flow_path.display(),
-        args.flow_type
-    );
-    Ok(())
-}
-
-fn execute_wizard_new_plan(plan: &wizard::WizardPlan, force: bool, backup: bool) -> Result<()> {
-    for step in &plan.steps {
-        match step {
-            wizard::WizardPlanStep::EnsureDir { path } => {
-                fs::create_dir_all(path)
-                    .with_context(|| format!("create scaffold directory {}", path.display()))?;
-            }
-            wizard::WizardPlanStep::WriteFile { path, content } => {
-                write_flow_file(path, content, force, backup)?;
-            }
-            wizard::WizardPlanStep::ValidateFlow { path } => {
-                let doc = load_ygtc_from_path(path)
-                    .with_context(|| format!("load scaffolded flow {}", path.display()))?;
-                let flow = greentic_flow::compile_flow(doc)
-                    .map_err(|err| anyhow!("compile scaffolded flow {}: {err}", path.display()))?;
-                let lint_errors = lint_builtin_rules(&flow);
-                if !lint_errors.is_empty() {
-                    anyhow::bail!(
-                        "scaffolded flow {} failed builtin lint: {}",
-                        path.display(),
-                        lint_errors.join("; ")
-                    );
+    let mut screen = WizardScreen::MainMenu;
+    loop {
+        match screen.clone() {
+            WizardScreen::MainMenu => {
+                let answer = wizard_menu_answer(
+                    &mut reader,
+                    &mut writer,
+                    "main.menu",
+                    &wizard_t("wizard.menu.main.prompt"),
+                    &["1", "2", "3", "4", "0"],
+                )?;
+                session.answers_log.insert(
+                    "main.menu".to_string(),
+                    serde_json::Value::String(answer.clone()),
+                );
+                match answer.as_str() {
+                    "1" => {
+                        if let Err(err) = wizard_add_flow_with_io(
+                            &session.staged_pack_dir,
+                            &mut reader,
+                            &mut writer,
+                        ) {
+                            writeln!(writer, "{}", err).ok();
+                        } else {
+                            session.dirty = true;
+                        }
+                    }
+                    "2" => {
+                        screen = WizardScreen::FlowSelect;
+                    }
+                    "3" => {
+                        if let Err(err) = wizard_generate_translations_with_io(
+                            &session.staged_pack_dir,
+                            &mut reader,
+                            &mut writer,
+                            &mut session.answers_log,
+                        ) {
+                            writeln!(writer, "{}", err).ok();
+                        } else {
+                            session.dirty = true;
+                        }
+                    }
+                    "4" => {
+                        if let Err(err) =
+                            wizard_save_staged_changes(&mut session, &mut reader, &mut writer)
+                        {
+                            writeln!(writer, "{}", err).ok();
+                        }
+                    }
+                    "0" => {
+                        if session.dirty {
+                            writeln!(writer, "{}", wizard_t("wizard.save.discarded")).ok();
+                        }
+                        let _ = fs::remove_dir_all(&session.staged_pack_dir);
+                        return Ok(());
+                    }
+                    _ => {}
                 }
             }
-            wizard::WizardPlanStep::RunCommand { command, .. } => {
-                anyhow::bail!("unsupported wizard new plan step RunCommand('{command}')");
+            WizardScreen::FlowSelect => {
+                let flows = collect_pack_flows(&session.staged_pack_dir)?;
+                let mut prompt = format!("{}\n", wizard_t("wizard.menu.flow_select.title"));
+                for (idx, flow) in flows.iter().enumerate() {
+                    let rel = flow.strip_prefix(&session.staged_pack_dir).unwrap_or(flow);
+                    prompt.push_str(&format!("{}. {}\n", idx + 1, rel.display()));
+                }
+                prompt.push_str(&format!(
+                    "{}\n{}",
+                    wizard_t("wizard.menu.nav.back"),
+                    wizard_t("wizard.menu.nav.main")
+                ));
+                let mut choices: Vec<String> = (1..=flows.len()).map(|n| n.to_string()).collect();
+                choices.push("0".to_string());
+                choices.push("M".to_string());
+                let choice_refs: Vec<&str> = choices.iter().map(String::as_str).collect();
+                let answer = wizard_menu_answer(
+                    &mut reader,
+                    &mut writer,
+                    "flow.select",
+                    &prompt,
+                    &choice_refs,
+                )?;
+                session.answers_log.insert(
+                    "flow.select".to_string(),
+                    serde_json::Value::String(answer.clone()),
+                );
+                match answer.as_str() {
+                    "0" => screen = WizardScreen::MainMenu,
+                    "M" => screen = WizardScreen::MainMenu,
+                    raw => {
+                        let idx = raw
+                            .parse::<usize>()
+                            .context("parse selected flow index")?
+                            .saturating_sub(1);
+                        if let Some(flow_path) = flows.get(idx) {
+                            screen = WizardScreen::FlowOps {
+                                flow_path: flow_path.clone(),
+                            };
+                        }
+                    }
+                }
+            }
+            WizardScreen::FlowOps { flow_path } => {
+                let rel = flow_path
+                    .strip_prefix(&session.staged_pack_dir)
+                    .unwrap_or(&flow_path);
+                let prompt = wizard_t_with(
+                    "wizard.menu.flow_ops.prompt",
+                    &[("flow", &rel.display().to_string())],
+                );
+                let answer = wizard_menu_answer(
+                    &mut reader,
+                    &mut writer,
+                    "flow.ops",
+                    &prompt,
+                    &["1", "2", "3", "4", "5", "6", "0", "M"],
+                )?;
+                session.answers_log.insert(
+                    "flow.ops".to_string(),
+                    serde_json::Value::String(answer.clone()),
+                );
+                match answer.as_str() {
+                    "0" => screen = WizardScreen::FlowSelect,
+                    "M" => screen = WizardScreen::MainMenu,
+                    "1" => {
+                        if let Err(err) =
+                            wizard_edit_flow_summary_with_io(&flow_path, &mut reader, &mut writer)
+                        {
+                            writeln!(writer, "{}", err).ok();
+                        } else {
+                            session.dirty = true;
+                        }
+                    }
+                    "2" => {
+                        if let Err(err) = wizard_add_step_with_io(
+                            &session.staged_pack_dir,
+                            &flow_path,
+                            &mut reader,
+                            &mut writer,
+                        ) {
+                            writeln!(writer, "{}", err).ok();
+                        } else {
+                            session.dirty = true;
+                        }
+                    }
+                    "3" => {
+                        if let Err(err) = wizard_update_step_with_io(
+                            &session.staged_pack_dir,
+                            &flow_path,
+                            &mut reader,
+                            &mut writer,
+                        ) {
+                            writeln!(writer, "{}", err).ok();
+                        } else {
+                            session.dirty = true;
+                        }
+                    }
+                    "4" => {
+                        if let Err(err) =
+                            wizard_delete_step_with_io(&flow_path, &mut reader, &mut writer)
+                        {
+                            writeln!(writer, "{}", err).ok();
+                        } else {
+                            session.dirty = true;
+                        }
+                    }
+                    "5" => {
+                        if let Err(err) =
+                            wizard_delete_flow_with_io(&flow_path, &mut reader, &mut writer)
+                        {
+                            writeln!(writer, "{}", err).ok();
+                        } else {
+                            session.dirty = true;
+                            screen = WizardScreen::FlowSelect;
+                        }
+                    }
+                    "6" => {
+                        if let Err(err) =
+                            wizard_save_staged_changes(&mut session, &mut reader, &mut writer)
+                        {
+                            writeln!(writer, "{}", err).ok();
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
+}
+
+fn create_wizard_staging_pack(pack_dir: &Path) -> Result<PathBuf> {
+    if !pack_dir.exists() {
+        anyhow::bail!(
+            "{}",
+            wizard_t_with(
+                "wizard.error.pack_dir_not_found",
+                &[("path", &pack_dir.display().to_string())]
+            )
+        );
+    }
+    let unique = format!(
+        "greentic-flow-wizard-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    );
+    let stage_root = env::temp_dir().join(unique);
+    fs::create_dir_all(&stage_root)
+        .with_context(|| format!("create directory {}", stage_root.display()))?;
+    for entry in ["flows", "i18n", "components"] {
+        let src = pack_dir.join(entry);
+        let dst = stage_root.join(entry);
+        if src.exists() {
+            copy_dir_recursive(&src, &dst)?;
+        }
+    }
+    Ok(stage_root)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    if src.is_file() {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create directory {}", parent.display()))?;
+        }
+        fs::copy(src, dst)
+            .with_context(|| format!("copy file {} -> {}", src.display(), dst.display()))?;
+        return Ok(());
+    }
+    fs::create_dir_all(dst).with_context(|| format!("create directory {}", dst.display()))?;
+    for entry in fs::read_dir(src).with_context(|| format!("read directory {}", src.display()))? {
+        let entry = entry.with_context(|| format!("read entry under {}", src.display()))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path).with_context(|| {
+                format!("copy file {} -> {}", src_path.display(), dst_path.display())
+            })?;
+        }
+    }
     Ok(())
+}
+
+fn wizard_save_staged_changes<R: Read, W: Write>(
+    session: &mut WizardSession,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let answers_path = wizard_answers_output_path(session, reader, writer)?;
+    write_wizard_answers_file(&answers_path, &session.answers_log)?;
+    if !session.dirty {
+        writeln!(writer, "{}", wizard_t("wizard.save.no_changes")).ok();
+        return Ok(());
+    }
+
+    let flows_target = session.staged_pack_dir.join("flows");
+    wizard_validate_flows(&flows_target)
+        .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.save.doctor_failed")))?;
+
+    if !session.config.dry_run {
+        sync_staged_pack_back(session)?;
+        session.dirty = false;
+        writeln!(writer, "{}", wizard_t("wizard.save.done")).ok();
+    } else {
+        session.dirty = false;
+        writeln!(writer, "{}", wizard_t("wizard.save.dry_run_done")).ok();
+    }
+    Ok(())
+}
+
+fn wizard_validate_flows(target: &Path) -> Result<()> {
+    let schema_text = EMBEDDED_FLOW_SCHEMA.to_string();
+    let schema_label = "embedded ygtc.flow.schema.json".to_string();
+    let schema_path = PathBuf::from("schemas/ygtc.flow.schema.json");
+    let lint_ctx = LintContext {
+        schema_text: &schema_text,
+        schema_label: &schema_label,
+        schema_path: schema_path.as_path(),
+        registry: None,
+        schema_mode: SchemaMode::Strict,
+    };
+    let mut failures = 0usize;
+    lint_path(target, &lint_ctx, false, &mut failures)?;
+    if failures == 0 {
+        Ok(())
+    } else {
+        anyhow::bail!("{failures} flow(s) failed validation");
+    }
+}
+
+fn wizard_answers_output_path<R: Read, W: Write>(
+    session: &mut WizardSession,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<PathBuf> {
+    if let Some(path) = session.answers_output_path.clone() {
+        return Ok(path);
+    }
+    let path = if let Some(path) = session.config.answers_file.clone() {
+        path
+    } else {
+        let answers = run_questions_with_qa_lib_io(
+            &[Question {
+                id: "wizard.answers.path".to_string(),
+                prompt: wizard_t("wizard.answers.path.prompt"),
+                kind: greentic_flow::questions::QuestionKind::String,
+                required: false,
+                default: Some(serde_json::Value::String("./answers.json".to_string())),
+                choices: Vec::new(),
+                show_if: None,
+                writes_to: None,
+            }],
+            HashMap::new(),
+            &mut *reader,
+            &mut *writer,
+        )?;
+        let raw = answers
+            .get("wizard.answers.path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("./answers.json")
+            .trim();
+        let selected = if raw.is_empty() {
+            "./answers.json"
+        } else {
+            raw
+        };
+        session.answers_log.insert(
+            "wizard.answers.path".to_string(),
+            serde_json::Value::String(selected.to_string()),
+        );
+        PathBuf::from(selected)
+    };
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        session.real_pack_dir.join(path)
+    };
+    session.answers_output_path = Some(resolved.clone());
+    Ok(resolved)
+}
+
+fn write_wizard_answers_file(
+    path: &Path,
+    answers_log: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create directory {}", parent.display()))?;
+    }
+    let payload = serde_json::Value::Object(answers_log.clone());
+    let text = serde_json::to_string_pretty(&payload).context("serialize wizard answers")?;
+    fs::write(path, text).with_context(|| format!("write wizard answers {}", path.display()))?;
+    Ok(())
+}
+
+fn sync_staged_pack_back(session: &mut WizardSession) -> Result<()> {
+    sync_staged_dir(session, "flows")?;
+    sync_staged_dir(session, "i18n")?;
+    sync_staged_dir(session, "components")?;
+    Ok(())
+}
+
+fn sync_staged_dir(session: &WizardSession, name: &str) -> Result<()> {
+    let staged_dir = session.staged_pack_dir.join(name);
+    let real_dir = session.real_pack_dir.join(name);
+    if real_dir.exists() {
+        fs::remove_dir_all(&real_dir)
+            .with_context(|| format!("remove directory {}", real_dir.display()))?;
+    }
+    if staged_dir.exists() {
+        copy_dir_recursive(&staged_dir, &real_dir)?;
+    } else {
+        fs::create_dir_all(&real_dir)
+            .with_context(|| format!("create directory {}", real_dir.display()))?;
+    }
+    Ok(())
+}
+
+fn wizard_menu_answer<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    question_id: &str,
+    prompt: &str,
+    choices: &[&str],
+) -> Result<String> {
+    let locale = resolve_locale(None);
+    let qa_i18n = wizard_qa_i18n_config_for_locale(&locale);
+    let spec = serde_json::json!({
+        "id": format!("wizard.{question_id}"),
+        "title": "wizard",
+        "version": "1.0.0",
+        "presentation": { "default_locale": locale },
+        "questions": [{
+            "id": question_id,
+            "type": "enum",
+            "title": prompt,
+            "required": true,
+            "choices": choices,
+        }]
+    });
+
+    let mut driver = WizardDriver::new(QaWizardRunConfig {
+        spec_json: spec.to_string(),
+        initial_answers_json: None,
+        frontend: WizardFrontend::JsonUi,
+        i18n: qa_i18n,
+        verbose: false,
+    })
+    .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+    loop {
+        let ui_raw = driver
+            .next_payload_json()
+            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+        if driver.is_complete() {
+            break;
+        }
+        let ui: serde_json::Value = serde_json::from_str(&ui_raw)
+            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+        let next_id = ui
+            .get("next_question_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.qa_runner_failed")))?;
+        let question = ui
+            .get("questions")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|questions| {
+                questions.iter().find(|q| {
+                    q.get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| id == next_id)
+                })
+            })
+            .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.qa_runner_failed")))?;
+        let title = question
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(prompt);
+        writeln!(writer, "{title}").ok();
+        let valid_choices: Vec<String> = question
+            .get("choices")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        loop {
+            write!(writer, "> ").ok();
+            writer.flush().ok();
+            let line = read_input_line(reader)?;
+            if valid_choices.iter().any(|choice| choice == &line) {
+                let patch = serde_json::json!({ next_id: line });
+                driver
+                    .submit_patch_json(&patch.to_string())
+                    .map_err(|err| {
+                        anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed"))
+                    })?;
+                break;
+            }
+            writeln!(
+                writer,
+                "{}",
+                wizard_t_with(
+                    "wizard.error.invalid_choice",
+                    &[("choices", &valid_choices.join(", "))]
+                )
+            )
+            .ok();
+        }
+    }
+    let run = driver
+        .finish()
+        .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+    let value = run
+        .answer_set
+        .answers
+        .get(question_id)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            anyhow!(
+                "{}",
+                wizard_t_with(
+                    "wizard.error.missing_answer_for_question",
+                    &[("id", question_id)]
+                )
+            )
+        })?;
+    Ok(value.to_string())
+}
+
+fn read_input_line<R: Read>(reader: &mut R) -> Result<String> {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let read = reader.read(&mut byte)?;
+        if read == 0 {
+            break;
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        if byte[0] != b'\r' {
+            buf.push(byte[0]);
+        }
+    }
+    Ok(String::from_utf8(buf)
+        .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.invalid_utf8_input")))?
+        .trim()
+        .to_string())
+}
+
+fn run_questions_with_qa_lib_io<R: Read, W: Write>(
+    questions: &[Question],
+    seed: HashMap<String, serde_json::Value>,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<HashMap<String, serde_json::Value>> {
+    let locale = resolve_locale(None);
+    let qa_i18n = wizard_qa_i18n_config_for_locale(&locale);
+    let spec = qa_form_from_questions(questions)?;
+    let mut driver = WizardDriver::new(QaWizardRunConfig {
+        spec_json: spec.to_string(),
+        initial_answers_json: Some(serde_json::Value::Object(map_from_answers(&seed)).to_string()),
+        frontend: WizardFrontend::JsonUi,
+        i18n: qa_i18n,
+        verbose: false,
+    })
+    .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+
+    while !driver.is_complete() {
+        let payload_raw = driver
+            .next_payload_json()
+            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+        let payload: serde_json::Value = serde_json::from_str(&payload_raw)
+            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+        let Some(question_id) = payload.get("next_question_id").and_then(|v| v.as_str()) else {
+            break;
+        };
+        let question = payload
+            .get("questions")
+            .and_then(|v| v.as_array())
+            .and_then(|questions| {
+                questions.iter().find(|question| {
+                    question
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| id == question_id)
+                })
+            })
+            .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.qa_runner_failed")))?;
+        let title = question
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or(question_id);
+        writeln!(writer, "{title}").ok();
+        write!(writer, "> ").ok();
+        writer.flush().ok();
+        let line = read_input_line(reader)?;
+        let answer = parse_qa_input_value(question, &line)?;
+        let patch = serde_json::json!({ question_id: answer });
+        driver
+            .submit_patch_json(&patch.to_string())
+            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+    }
+
+    let result = driver
+        .finish()
+        .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+    let Some(answers) = result.answer_set.answers.as_object() else {
+        return Ok(seed);
+    };
+    Ok(answers
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect())
+}
+
+fn qa_form_from_questions(questions: &[Question]) -> Result<serde_json::Value> {
+    let mut mapped = Vec::with_capacity(questions.len());
+    for question in questions {
+        let qtype = match question.kind {
+            greentic_flow::questions::QuestionKind::String => "string",
+            greentic_flow::questions::QuestionKind::Bool => "boolean",
+            greentic_flow::questions::QuestionKind::Choice => "enum",
+            greentic_flow::questions::QuestionKind::Int => "integer",
+            greentic_flow::questions::QuestionKind::Float => "number",
+        };
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "id".to_string(),
+            serde_json::Value::String(question.id.clone()),
+        );
+        entry.insert(
+            "type".to_string(),
+            serde_json::Value::String(qtype.to_string()),
+        );
+        entry.insert(
+            "title".to_string(),
+            serde_json::Value::String(question.prompt.clone()),
+        );
+        entry.insert(
+            "required".to_string(),
+            serde_json::Value::Bool(question.required),
+        );
+        if let Some(default) = question.default.as_ref() {
+            entry.insert(
+                "default_value".to_string(),
+                serde_json::Value::String(match default {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                }),
+            );
+        }
+        if matches!(
+            question.kind,
+            greentic_flow::questions::QuestionKind::Choice
+        ) && !question.choices.is_empty()
+        {
+            let choices = question
+                .choices
+                .iter()
+                .map(|value| match value {
+                    serde_json::Value::String(text) => serde_json::Value::String(text.clone()),
+                    other => serde_json::Value::String(other.to_string()),
+                })
+                .collect::<Vec<_>>();
+            entry.insert("choices".to_string(), serde_json::Value::Array(choices));
+        }
+        if let Some(show_if) = question.show_if.as_ref()
+            && let Some(expr) = qa_visible_if_expr(show_if)
+        {
+            entry.insert("visible_if".to_string(), expr);
+        }
+        mapped.push(serde_json::Value::Object(entry));
+    }
+
+    Ok(serde_json::json!({
+        "id": "wizard.form",
+        "title": "wizard",
+        "version": "1.0.0",
+        "questions": mapped,
+    }))
+}
+
+fn qa_visible_if_expr(show_if: &serde_json::Value) -> Option<serde_json::Value> {
+    let id = show_if.get("id")?.as_str()?;
+    let equals = show_if.get("equals")?.clone();
+    Some(serde_json::json!({
+        "op": "and",
+        "expressions": [
+            { "op": "is_set", "path": format!("/{id}") },
+            {
+                "op": "eq",
+                "left": { "op": "answer", "path": format!("/{id}") },
+                "right": { "op": "literal", "value": equals }
+            }
+        ]
+    }))
+}
+
+fn parse_qa_input_value(question: &serde_json::Value, raw: &str) -> Result<serde_json::Value> {
+    let qtype = question
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("string");
+    let required = question
+        .get("required")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let trimmed = raw.trim();
+    let effective = if trimmed.is_empty() {
+        if let Some(default) = question.get("default").and_then(serde_json::Value::as_str) {
+            default.to_string()
+        } else if let Some(default) = question
+            .get("default_value")
+            .and_then(serde_json::Value::as_str)
+        {
+            default.to_string()
+        } else if required {
+            anyhow::bail!("{}", wizard_t("wizard.error.required_input"));
+        } else {
+            match qtype {
+                "boolean" => "false".to_string(),
+                "integer" => "0".to_string(),
+                "number" => "0".to_string(),
+                "enum" => question
+                    .get("choices")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|values| values.first())
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                _ => String::new(),
+            }
+        }
+    } else {
+        trimmed.to_string()
+    };
+
+    match qtype {
+        "boolean" => {
+            let lower = effective.to_ascii_lowercase();
+            Ok(serde_json::Value::Bool(matches!(
+                lower.as_str(),
+                "true" | "t" | "yes" | "y" | "1"
+            )))
+        }
+        "integer" => {
+            let value = effective.parse::<i64>().with_context(|| {
+                wizard_t_with("wizard.error.invalid_integer", &[("value", &effective)])
+            })?;
+            Ok(serde_json::Value::Number(value.into()))
+        }
+        "number" => {
+            let value = effective.parse::<f64>().with_context(|| {
+                wizard_t_with("wizard.error.invalid_number", &[("value", &effective)])
+            })?;
+            let Some(number) = serde_json::Number::from_f64(value) else {
+                anyhow::bail!("{}", wizard_t("wizard.error.number_out_of_range"));
+            };
+            Ok(serde_json::Value::Number(number))
+        }
+        "enum" => {
+            let choices = question
+                .get("choices")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.enum_choices_missing")))?;
+            if let Ok(index) = effective.parse::<usize>()
+                && index > 0
+                && index <= choices.len()
+                && let Some(value) = choices[index - 1].as_str()
+            {
+                return Ok(serde_json::Value::String(value.to_string()));
+            }
+            if choices
+                .iter()
+                .any(|choice| choice.as_str().is_some_and(|value| value == effective))
+            {
+                return Ok(serde_json::Value::String(effective));
+            }
+            anyhow::bail!(
+                "{}",
+                wizard_t_with(
+                    "wizard.error.invalid_choice",
+                    &[(
+                        "choices",
+                        &choices
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )]
+                )
+            );
+        }
+        _ => Ok(serde_json::Value::String(effective)),
+    }
+}
+
+fn run_component_qa_with_qa_lib(
+    spec: &ComponentQaSpec,
+    catalog: &I18nCatalog,
+    locale: &str,
+    mut answers: HashMap<String, serde_json::Value>,
+    interactive: bool,
+) -> Result<HashMap<String, serde_json::Value>> {
+    let form_json = component_spec_to_qa_form_json(spec, catalog, locale)?;
+    if !interactive {
+        let form: qa_spec::FormSpec = serde_json::from_str(&form_json).context("parse qa form")?;
+        let result = qa_spec::validate(
+            &form,
+            &serde_json::Value::Object(map_from_answers(&answers)),
+        );
+        if !result.valid {
+            if !result.missing_required.is_empty() {
+                anyhow::bail!(
+                    "missing required answers: {} (provide --answers/--answers-file)",
+                    result.missing_required.join(", ")
+                );
+            }
+            let details = result
+                .errors
+                .iter()
+                .map(|err| err.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!("answers failed validation: {details}");
+        }
+        return Ok(answers);
+    }
+
+    let mut driver = WizardDriver::new(QaWizardRunConfig {
+        spec_json: form_json,
+        initial_answers_json: Some(
+            serde_json::Value::Object(map_from_answers(&answers)).to_string(),
+        ),
+        frontend: WizardFrontend::JsonUi,
+        i18n: QaI18nConfig {
+            locale: Some(locale.to_string()),
+            resolved: None,
+            debug: false,
+        },
+        verbose: false,
+    })
+    .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+
+    while !driver.is_complete() {
+        let payload_raw = driver
+            .next_payload_json()
+            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+        let payload: serde_json::Value = serde_json::from_str(&payload_raw)
+            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+        let Some(next_question_id) = payload.get("next_question_id").and_then(|v| v.as_str())
+        else {
+            break;
+        };
+        let question = payload
+            .get("questions")
+            .and_then(|v| v.as_array())
+            .and_then(|questions| {
+                questions.iter().find(|question| {
+                    question
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| id == next_question_id)
+                })
+            })
+            .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.qa_runner_failed")))?;
+
+        let title = question
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or(next_question_id);
+        if let Some(description) = question.get("description").and_then(|v| v.as_str()) {
+            println!("{title} ({description})");
+        } else {
+            println!("{title}");
+        }
+        if let Some(choices) = question.get("choices").and_then(|v| v.as_array()) {
+            for (idx, choice) in choices.iter().enumerate() {
+                if let Some(value) = choice.as_str() {
+                    println!("  {}. {}", idx + 1, value);
+                }
+            }
+        }
+
+        let prompt = match question.get("type").and_then(|v| v.as_str()) {
+            Some("enum") => wizard_t("wizard.qa.prompt.select_option"),
+            Some("boolean") => wizard_t("wizard.qa.prompt.enter_true_false"),
+            Some("number") => wizard_t("wizard.qa.prompt.enter_number"),
+            Some("integer") => wizard_t("wizard.qa.prompt.enter_integer"),
+            _ => wizard_t("wizard.qa.prompt.enter_text"),
+        };
+        print!("{prompt}: ");
+        io::stdout().flush().context("flush stdout")?;
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .context("read interactive answer")?;
+        let raw = line.trim();
+        let answer = parse_component_qa_input(question, raw)?;
+        let patch = serde_json::json!({ next_question_id: answer });
+        driver
+            .submit_patch_json(&patch.to_string())
+            .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+    }
+
+    let result = driver
+        .finish()
+        .map_err(|err| anyhow!("{}: {err}", wizard_t("wizard.error.qa_runner_failed")))?;
+    if let Some(object) = result.answer_set.answers.as_object() {
+        answers = object.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    }
+    Ok(answers)
+}
+
+fn component_spec_to_qa_form_json(
+    spec: &ComponentQaSpec,
+    catalog: &I18nCatalog,
+    locale: &str,
+) -> Result<String> {
+    let mut questions = Vec::with_capacity(spec.questions.len());
+    for question in &spec.questions {
+        let (kind, choices) = match &question.kind {
+            QuestionKind::Text => ("string", None),
+            QuestionKind::Number => ("number", None),
+            QuestionKind::Bool => ("boolean", None),
+            QuestionKind::Choice { options } => (
+                "enum",
+                Some(
+                    options
+                        .iter()
+                        .map(|option| serde_json::Value::String(option.value.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+            ),
+        };
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "id".to_string(),
+            serde_json::Value::String(question.id.clone()),
+        );
+        entry.insert(
+            "type".to_string(),
+            serde_json::Value::String(kind.to_string()),
+        );
+        entry.insert(
+            "title".to_string(),
+            serde_json::Value::String(greentic_flow::i18n::resolve_text(
+                &question.label,
+                catalog,
+                locale,
+            )),
+        );
+        if let Some(help) = question.help.as_ref() {
+            entry.insert(
+                "description".to_string(),
+                serde_json::Value::String(greentic_flow::i18n::resolve_text(help, catalog, locale)),
+            );
+        }
+        entry.insert(
+            "required".to_string(),
+            serde_json::Value::Bool(question.required),
+        );
+        if let Some(choice_values) = choices {
+            entry.insert(
+                "choices".to_string(),
+                serde_json::Value::Array(choice_values),
+            );
+        }
+        questions.push(serde_json::Value::Object(entry));
+    }
+
+    let form = serde_json::json!({
+        "id": "component-setup",
+        "title": greentic_flow::i18n::resolve_text(&spec.title, catalog, locale),
+        "version": "0.6.0",
+        "description": spec.description.as_ref().map(|text| greentic_flow::i18n::resolve_text(text, catalog, locale)),
+        "questions": questions,
+    });
+    serde_json::to_string(&form).context("serialize qa-lib form")
+}
+
+fn parse_component_qa_input(question: &serde_json::Value, raw: &str) -> Result<serde_json::Value> {
+    let trimmed = raw.trim();
+    match question
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("string")
+    {
+        "boolean" => {
+            let lower = trimmed.to_ascii_lowercase();
+            Ok(serde_json::Value::Bool(matches!(
+                lower.as_str(),
+                "true" | "t" | "yes" | "y" | "1"
+            )))
+        }
+        "number" => {
+            let parsed = trimmed.parse::<f64>().with_context(|| {
+                wizard_t_with("wizard.error.invalid_number", &[("value", trimmed)])
+            })?;
+            let Some(number) = serde_json::Number::from_f64(parsed) else {
+                anyhow::bail!("{}", wizard_t("wizard.error.number_out_of_range"));
+            };
+            Ok(serde_json::Value::Number(number))
+        }
+        "integer" => {
+            let parsed = trimmed.parse::<i64>().with_context(|| {
+                wizard_t_with("wizard.error.invalid_integer", &[("value", trimmed)])
+            })?;
+            Ok(serde_json::Value::Number(parsed.into()))
+        }
+        "enum" => {
+            let choices = question
+                .get("choices")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.enum_choices_missing")))?;
+            if let Ok(index) = trimmed.parse::<usize>()
+                && index > 0
+                && index <= choices.len()
+                && let Some(value) = choices[index - 1].as_str()
+            {
+                return Ok(serde_json::Value::String(value.to_string()));
+            }
+            if choices
+                .iter()
+                .any(|choice| choice.as_str().is_some_and(|value| value == trimmed))
+            {
+                return Ok(serde_json::Value::String(trimmed.to_string()));
+            }
+            anyhow::bail!(
+                "{}",
+                wizard_t_with(
+                    "wizard.error.invalid_choice",
+                    &[(
+                        "choices",
+                        &choices
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )]
+                )
+            );
+        }
+        _ => Ok(serde_json::Value::String(trimmed.to_string())),
+    }
+}
+
+fn map_from_answers(
+    answers: &HashMap<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    for (key, value) in answers {
+        if !value.is_null() {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+    map
+}
+
+fn collect_pack_flows(pack_dir: &Path) -> Result<Vec<PathBuf>> {
+    let flows_root = pack_dir.join("flows");
+    if !flows_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    collect_pack_flows_recursive(&flows_root, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn collect_pack_flows_recursive(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if root.is_file() {
+        if root.extension() == Some(OsStr::new("ygtc")) {
+            out.push(root.to_path_buf());
+        }
+        return Ok(());
+    }
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).with_context(|| format!("read directory {}", root.display()))? {
+        let path = entry
+            .with_context(|| format!("read directory entry in {}", root.display()))?
+            .path();
+        collect_pack_flows_recursive(&path, out)?;
+    }
+    Ok(())
+}
+
+fn wizard_add_flow_with_io<R: Read, W: Write>(
+    pack_dir: &Path,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let questions = vec![
+        Question {
+            id: "flow.scope".to_string(),
+            prompt: wizard_t("wizard.add_flow.scope.prompt"),
+            kind: greentic_flow::questions::QuestionKind::Choice,
+            required: true,
+            default: Some(serde_json::Value::String("global".to_string())),
+            choices: vec![
+                serde_json::Value::String("global".to_string()),
+                serde_json::Value::String("tenant".to_string()),
+            ],
+            show_if: None,
+            writes_to: None,
+        },
+        Question {
+            id: "flow.tenant_id".to_string(),
+            prompt: wizard_t("wizard.add_flow.tenant.prompt"),
+            kind: greentic_flow::questions::QuestionKind::String,
+            required: true,
+            default: None,
+            choices: Vec::new(),
+            show_if: Some(serde_json::json!({"id":"flow.scope","equals":"tenant"})),
+            writes_to: None,
+        },
+        Question {
+            id: "flow.team_scope".to_string(),
+            prompt: wizard_t("wizard.add_flow.team_scope.prompt"),
+            kind: greentic_flow::questions::QuestionKind::Choice,
+            required: true,
+            default: Some(serde_json::Value::String("all-teams".to_string())),
+            choices: vec![
+                serde_json::Value::String("all-teams".to_string()),
+                serde_json::Value::String("specific-team".to_string()),
+            ],
+            show_if: Some(serde_json::json!({"id":"flow.scope","equals":"tenant"})),
+            writes_to: None,
+        },
+        Question {
+            id: "flow.team_id".to_string(),
+            prompt: wizard_t("wizard.add_flow.team.prompt"),
+            kind: greentic_flow::questions::QuestionKind::String,
+            required: true,
+            default: None,
+            choices: Vec::new(),
+            show_if: Some(serde_json::json!({"id":"flow.team_scope","equals":"specific-team"})),
+            writes_to: None,
+        },
+        Question {
+            id: "flow.type".to_string(),
+            prompt: wizard_t("wizard.add_flow.type.prompt"),
+            kind: greentic_flow::questions::QuestionKind::Choice,
+            required: true,
+            default: Some(serde_json::Value::String("messaging".to_string())),
+            choices: vec![
+                serde_json::Value::String("messaging".to_string()),
+                serde_json::Value::String("events".to_string()),
+            ],
+            show_if: None,
+            writes_to: None,
+        },
+        Question {
+            id: "flow.name".to_string(),
+            prompt: wizard_t("wizard.add_flow.name.prompt"),
+            kind: greentic_flow::questions::QuestionKind::String,
+            required: true,
+            default: None,
+            choices: Vec::new(),
+            show_if: None,
+            writes_to: None,
+        },
+    ];
+
+    let answers =
+        run_questions_with_qa_lib_io(&questions, HashMap::new(), &mut *reader, &mut *writer)?;
+    let scope = answer_str(&answers, "flow.scope")?;
+    let tenant = answers
+        .get("flow.tenant_id")
+        .and_then(serde_json::Value::as_str);
+    let team_scope = answers
+        .get("flow.team_scope")
+        .and_then(serde_json::Value::as_str);
+    let team_id = answers
+        .get("flow.team_id")
+        .and_then(serde_json::Value::as_str);
+    let flow_type = answer_str(&answers, "flow.type")?;
+    let flow_name = answer_str(&answers, "flow.name")?;
+
+    let rel_path =
+        build_add_flow_relative_path(scope, tenant, team_scope, team_id, flow_type, flow_name)?;
+    let abs_path = pack_dir.join(&rel_path);
+    let flow_id = flow_id_from_name(flow_name)?;
+    write_new_flow_file(NewFlowFileSpec {
+        flow_path: abs_path.clone(),
+        flow_id,
+        flow_type: flow_type.to_string(),
+        schema_version: 2,
+        name: None,
+        description: None,
+        force: false,
+        backup: false,
+    })?;
+    writeln!(
+        writer,
+        "{}",
+        wizard_t_with(
+            "wizard.add_flow.created",
+            &[("path", &abs_path.display().to_string())]
+        )
+    )
+    .ok();
+    Ok(())
+}
+
+struct NewFlowFileSpec {
+    flow_path: PathBuf,
+    flow_id: String,
+    flow_type: String,
+    schema_version: u32,
+    name: Option<String>,
+    description: Option<String>,
+    force: bool,
+    backup: bool,
+}
+
+fn write_new_flow_file(spec: NewFlowFileSpec) -> Result<()> {
+    let doc = greentic_flow::model::FlowDoc {
+        id: spec.flow_id,
+        title: spec.name,
+        description: spec.description,
+        flow_type: spec.flow_type,
+        start: None,
+        parameters: serde_json::Value::Object(Default::default()),
+        tags: Vec::new(),
+        schema_version: Some(spec.schema_version),
+        entrypoints: IndexMap::new(),
+        meta: None,
+        nodes: IndexMap::new(),
+    };
+    let mut yaml = serde_yaml_bw::to_string(&doc)?;
+    if !yaml.ends_with('\n') {
+        yaml.push('\n');
+    }
+    write_flow_file(&spec.flow_path, &yaml, spec.force, spec.backup)
+}
+
+fn wizard_edit_flow_summary_with_io<R: Read, W: Write>(
+    flow_path: &Path,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let doc = load_ygtc_from_path(flow_path)?;
+    let current_name = resolve_flow_summary_value(flow_path, doc.title.as_deref());
+    let current_description = resolve_flow_summary_value(flow_path, doc.description.as_deref());
+    let not_set = wizard_t("wizard.flow.summary.not_set");
+    writeln!(
+        writer,
+        "{}",
+        wizard_t_with(
+            "wizard.flow.summary.current_name",
+            &[("value", current_name.as_deref().unwrap_or(not_set.as_str()))]
+        )
+    )
+    .ok();
+    writeln!(
+        writer,
+        "{}",
+        wizard_t_with(
+            "wizard.flow.summary.current_description",
+            &[(
+                "value",
+                current_description.as_deref().unwrap_or(not_set.as_str())
+            )]
+        )
+    )
+    .ok();
+    let edit_prompt = format!(
+        "{}\n1) {}\n2) {}\nSelect action",
+        wizard_t("wizard.flow.summary.edit.prompt"),
+        wizard_t("wizard.choice.common.no"),
+        wizard_t("wizard.choice.common.yes")
+    );
+    let edit_answer = wizard_menu_answer(
+        &mut *reader,
+        &mut *writer,
+        "summary.edit",
+        &edit_prompt,
+        &["1", "2"],
+    )?;
+    if edit_answer.trim() != "2" {
+        writeln!(writer, "{}", wizard_t("wizard.flow.summary.no_changes")).ok();
+        return Ok(());
+    }
+    let questions = vec![
+        Question {
+            id: "summary.name".to_string(),
+            prompt: wizard_t("wizard.flow.summary.name.prompt"),
+            kind: greentic_flow::questions::QuestionKind::String,
+            required: false,
+            default: current_name.map(serde_json::Value::String),
+            choices: Vec::new(),
+            show_if: None,
+            writes_to: None,
+        },
+        Question {
+            id: "summary.description".to_string(),
+            prompt: wizard_t("wizard.flow.summary.description.prompt"),
+            kind: greentic_flow::questions::QuestionKind::String,
+            required: false,
+            default: current_description.map(serde_json::Value::String),
+            choices: Vec::new(),
+            show_if: None,
+            writes_to: None,
+        },
+    ];
+    let answers =
+        run_questions_with_qa_lib_io(&questions, HashMap::new(), &mut *reader, &mut *writer)?;
+    let name = answers
+        .get("summary.name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    let description = answers
+        .get("summary.description")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToString::to_string);
+    if name.is_none() && description.is_none() {
+        writeln!(writer, "{}", wizard_t("wizard.flow.summary.no_changes")).ok();
+        return Ok(());
+    }
+    let flow_id = doc.id.clone();
+    let name_key = format!("flow.{flow_id}.title");
+    let description_key = format!("flow.{flow_id}.description");
+    let mut name_tag = None;
+    if let Some(name_value) = name.as_deref() {
+        write_pack_translation(flow_path, &name_key, name_value)?;
+        name_tag = Some(format!("i18n:{name_key}"));
+    }
+    let mut description_tag = None;
+    if let Some(description_value) = description.as_deref() {
+        write_pack_translation(flow_path, &description_key, description_value)?;
+        description_tag = Some(format!("i18n:{description_key}"));
+    }
+    handle_update(
+        UpdateArgs {
+            flow_path: flow_path.to_path_buf(),
+            flow_id: None,
+            flow_type: None,
+            schema_version: None,
+            name: name_tag,
+            description: description_tag,
+            tags: None,
+        },
+        false,
+    )?;
+    writeln!(writer, "{}", wizard_t("wizard.flow.summary.updated")).ok();
+    Ok(())
+}
+
+fn resolve_flow_summary_value(flow_path: &Path, value: Option<&str>) -> Option<String> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let Some(key) = raw.strip_prefix("i18n:") else {
+        return Some(raw.to_string());
+    };
+    read_pack_translation(flow_path, key.trim()).or_else(|| Some(raw.to_string()))
+}
+
+fn read_pack_translation(flow_path: &Path, key: &str) -> Option<String> {
+    let pack_root = infer_pack_root_from_flow_path(flow_path).ok()?;
+    let i18n_dir = pack_root.join("i18n");
+    for filename in pack_i18n_candidate_files() {
+        let path = i18n_dir.join(filename);
+        let text = fs::read_to_string(path).ok()?;
+        let map = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text).ok()?;
+        if let Some(value) = map.get(key).and_then(serde_json::Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn pack_i18n_candidate_files() -> Vec<String> {
+    let mut files = Vec::new();
+    let mut seen = BTreeSet::new();
+    let locale = resolve_locale(None);
+    let normalized = locale.trim().replace('_', "-");
+    if !normalized.is_empty() {
+        let full = format!("{normalized}.json");
+        if seen.insert(full.clone()) {
+            files.push(full);
+        }
+        if let Some((language, _)) = normalized.split_once('-') {
+            let lang = format!("{language}.json");
+            if seen.insert(lang.clone()) {
+                files.push(lang);
+            }
+        }
+    }
+    for fallback in ["en.json", "en-GB.json"] {
+        let fallback = fallback.to_string();
+        if seen.insert(fallback.clone()) {
+            files.push(fallback);
+        }
+    }
+    files
+}
+
+fn write_pack_translation(flow_path: &Path, key: &str, value: &str) -> Result<()> {
+    let pack_root = infer_pack_root_from_flow_path(flow_path)?;
+    let i18n_dir = pack_root.join("i18n");
+    fs::create_dir_all(&i18n_dir)
+        .with_context(|| format!("create directory {}", i18n_dir.display()))?;
+    let i18n_path = i18n_dir.join("en-GB.json");
+    let mut map = if i18n_path.exists() {
+        let text = fs::read_to_string(&i18n_path)
+            .with_context(|| format!("read translation file {}", i18n_path.display()))?;
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+            .unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+    map.insert(
+        key.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(map))
+        .context("serialize translation file")?;
+    fs::write(&i18n_path, text)
+        .with_context(|| format!("write translation file {}", i18n_path.display()))?;
+    Ok(())
+}
+
+fn infer_pack_root_from_flow_path(flow_path: &Path) -> Result<PathBuf> {
+    let mut cursor = flow_path.parent();
+    while let Some(path) = cursor {
+        if path.file_name().and_then(|s| s.to_str()) == Some("flows") {
+            let root = path.parent().ok_or_else(|| {
+                anyhow!(
+                    "{}",
+                    wizard_t_with(
+                        "wizard.error.flow_path_has_no_pack_root",
+                        &[("path", &flow_path.display().to_string())]
+                    )
+                )
+            })?;
+            return Ok(root.to_path_buf());
+        }
+        cursor = path.parent();
+    }
+    anyhow::bail!(
+        "{}",
+        wizard_t_with(
+            "wizard.error.cannot_infer_pack_root",
+            &[("path", &flow_path.display().to_string())]
+        )
+    )
+}
+
+fn wizard_delete_flow_with_io<R: Read, W: Write>(
+    flow_path: &Path,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let question = Question {
+        id: "delete.confirm".to_string(),
+        prompt: wizard_t("wizard.flow.delete.confirm.prompt"),
+        kind: greentic_flow::questions::QuestionKind::Choice,
+        required: true,
+        default: Some(serde_json::Value::String("no".to_string())),
+        choices: vec![
+            serde_json::Value::String("no".to_string()),
+            serde_json::Value::String("yes".to_string()),
+        ],
+        show_if: None,
+        writes_to: None,
+    };
+    let answers =
+        run_questions_with_qa_lib_io(&[question], HashMap::new(), &mut *reader, &mut *writer)?;
+    let confirm = answers
+        .get("delete.confirm")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("no");
+    if confirm != "yes" {
+        writeln!(writer, "{}", wizard_t("wizard.flow.delete.cancelled")).ok();
+        return Ok(());
+    }
+
+    let sidecar_path = sidecar_path_for_flow(flow_path);
+    let wizard_state_path = {
+        let base = flow_path.parent().unwrap_or_else(|| Path::new("."));
+        base.join(".greentic/cache/flow_wizard")
+    };
+
+    fs::remove_file(flow_path).with_context(|| format!("delete flow {}", flow_path.display()))?;
+    if sidecar_path.exists() {
+        let _ = fs::remove_file(&sidecar_path);
+    }
+    if wizard_state_path.exists() {
+        let _ = fs::remove_dir_all(&wizard_state_path);
+    }
+
+    writeln!(
+        writer,
+        "{}",
+        wizard_t_with(
+            "wizard.flow.delete.deleted",
+            &[("path", &flow_path.display().to_string())]
+        )
+    )
+    .ok();
+    Ok(())
+}
+
+fn wizard_delete_step_with_io<R: Read, W: Write>(
+    flow_path: &Path,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let doc = load_ygtc_from_path(flow_path)?;
+    let flow_ir = FlowIr::from_doc(doc)?;
+    if flow_ir.nodes.is_empty() {
+        writeln!(writer, "{}", wizard_t("wizard.step.delete.none")).ok();
+        return Ok(());
+    }
+    let mut choices: Vec<serde_json::Value> = flow_ir
+        .nodes
+        .keys()
+        .map(|id| serde_json::Value::String(id.clone()))
+        .collect();
+    choices.push(serde_json::Value::String("cancel".to_string()));
+    let question = Question {
+        id: "step.delete.id".to_string(),
+        prompt: wizard_t("wizard.step.delete.prompt"),
+        kind: greentic_flow::questions::QuestionKind::Choice,
+        required: true,
+        default: Some(serde_json::Value::String("cancel".to_string())),
+        choices,
+        show_if: None,
+        writes_to: None,
+    };
+    let answers =
+        run_questions_with_qa_lib_io(&[question], HashMap::new(), &mut *reader, &mut *writer)?;
+    let step_id = answers
+        .get("step.delete.id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("cancel");
+    if step_id == "cancel" {
+        writeln!(writer, "{}", wizard_t("wizard.step.delete.cancelled")).ok();
+        return Ok(());
+    }
+    handle_delete_step(
+        DeleteStepArgs {
+            component_id: None,
+            flow_path: flow_path.to_path_buf(),
+            step: Some(step_id.to_string()),
+            wizard_mode: None,
+            answers: None,
+            answers_file: None,
+            answers_dir: None,
+            overwrite_answers: false,
+            reask: false,
+            locale: None,
+            interactive: false,
+            component: None,
+            local_wasm: None,
+            distributor_url: None,
+            auth_token: None,
+            tenant: None,
+            env: None,
+            pack: None,
+            component_version: None,
+            abi_version: None,
+            resolver: None,
+            strategy: "splice".to_string(),
+            multi_pred: "error".to_string(),
+            assume_yes: true,
+            write: true,
+        },
+        OutputFormat::Human,
+        false,
+    )?;
+    writeln!(
+        writer,
+        "{}",
+        wizard_t_with("wizard.step.delete.deleted", &[("step", step_id)],)
+    )
+    .ok();
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct WizardStepSourceSelection {
+    local_wasm: Option<PathBuf>,
+    component_ref: Option<String>,
+    pin: bool,
+}
+
+fn wizard_add_step_with_io<R: Read, W: Write>(
+    pack_dir: &Path,
+    flow_path: &Path,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let doc = load_ygtc_from_path(flow_path)?;
+    let flow_ir = FlowIr::from_doc(doc)?;
+    let after = wizard_select_add_step_anchor_with_io(&flow_ir, &mut *reader, &mut *writer)?;
+
+    let source = match wizard_select_step_source(pack_dir, reader, writer, true)? {
+        Some(source) => source,
+        None => {
+            writeln!(writer, "{}", wizard_t("wizard.step.add.cancelled")).ok();
+            return Ok(());
+        }
+    };
+    let wizard_mode = wizard_select_setup_mode(reader, writer, "add")?;
+    let Some(wizard_mode) = wizard_mode else {
+        writeln!(writer, "{}", wizard_t("wizard.step.add.cancelled")).ok();
+        return Ok(());
+    };
+
+    let resolver = env::var("GREENTIC_FLOW_WIZARD_RESOLVER")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    handle_add_step(
+        AddStepArgs {
+            component_id: None,
+            flow_path: flow_path.to_path_buf(),
+            after,
+            mode: AddStepMode::Default,
+            pack_alias: None,
+            wizard_mode: Some(wizard_mode),
+            operation: None,
+            payload: "{}".to_string(),
+            routing_out: true,
+            routing_reply: false,
+            routing_next: None,
+            routing_multi_to: None,
+            routing_json: None,
+            routing_to_anchor: false,
+            config_flow: None,
+            answers: None,
+            answers_file: None,
+            answers_dir: None,
+            overwrite_answers: false,
+            reask: false,
+            locale: None,
+            interactive: true,
+            allow_cycles: false,
+            dry_run: false,
+            write: false,
+            validate_only: false,
+            manifests: Vec::new(),
+            node_id: None,
+            component_ref: source.component_ref,
+            local_wasm: source.local_wasm,
+            distributor_url: None,
+            auth_token: None,
+            tenant: None,
+            env: None,
+            pack: None,
+            component_version: None,
+            abi_version: None,
+            resolver,
+            pin: source.pin,
+            allow_contract_change: false,
+        },
+        SchemaMode::Strict,
+        OutputFormat::Human,
+        false,
+    )?;
+    writeln!(writer, "{}", wizard_t("wizard.step.add.done")).ok();
+    Ok(())
+}
+
+fn wizard_select_add_step_anchor_with_io<R: Read, W: Write>(
+    flow_ir: &FlowIr,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<Option<String>> {
+    let anchors: Vec<String> = flow_ir.nodes.keys().cloned().collect();
+    if anchors.is_empty() {
+        return Ok(None);
+    }
+
+    let mut prompt = format!("{}\n", wizard_t("wizard.step.add.after.prompt"));
+    let mut options = vec![wizard_t("wizard.choice.step.after.auto")];
+    options.extend(anchors.iter().cloned());
+    for (idx, option) in options.iter().enumerate() {
+        prompt.push_str(&format!("{}. {}\n", idx + 1, option));
+    }
+    prompt.push_str("Select anchor");
+
+    let choice_values: Vec<String> = (1..=options.len()).map(|n| n.to_string()).collect();
+    let choice_refs: Vec<&str> = choice_values.iter().map(String::as_str).collect();
+    let answer = wizard_menu_answer(
+        &mut *reader,
+        &mut *writer,
+        "step.add.after",
+        &prompt,
+        &choice_refs,
+    )?;
+    let selected_idx = answer
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|idx| *idx >= 1 && *idx <= options.len())
+        .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.invalid_number")))?;
+    if selected_idx == 1 {
+        return Ok(None);
+    }
+    Ok(anchors.get(selected_idx - 2).cloned())
+}
+
+fn wizard_update_step_with_io<R: Read, W: Write>(
+    pack_dir: &Path,
+    flow_path: &Path,
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<()> {
+    let doc = load_ygtc_from_path(flow_path)?;
+    let flow_ir = FlowIr::from_doc(doc)?;
+    if flow_ir.nodes.is_empty() {
+        writeln!(writer, "{}", wizard_t("wizard.step.update.none")).ok();
+        return Ok(());
+    }
+
+    let mut step_choices: Vec<serde_json::Value> = flow_ir
+        .nodes
+        .keys()
+        .map(|id| serde_json::Value::String(id.clone()))
+        .collect();
+    step_choices.push(serde_json::Value::String("cancel".to_string()));
+    let step_answers = run_questions_with_qa_lib_io(
+        &[Question {
+            id: "step.update.id".to_string(),
+            prompt: wizard_t("wizard.step.update.select.prompt"),
+            kind: greentic_flow::questions::QuestionKind::Choice,
+            required: true,
+            default: Some(serde_json::Value::String("cancel".to_string())),
+            choices: step_choices,
+            show_if: None,
+            writes_to: None,
+        }],
+        HashMap::new(),
+        &mut *reader,
+        &mut *writer,
+    )?;
+    let step_id = step_answers
+        .get("step.update.id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("cancel")
+        .to_string();
+    if step_id == "cancel" {
+        writeln!(writer, "{}", wizard_t("wizard.step.update.cancelled")).ok();
+        return Ok(());
+    }
+
+    let source = match wizard_select_step_source(pack_dir, reader, writer, false)? {
+        Some(source) => source,
+        None => {
+            writeln!(writer, "{}", wizard_t("wizard.step.update.cancelled")).ok();
+            return Ok(());
+        }
+    };
+    let wizard_mode = wizard_select_setup_mode(reader, writer, "update")?;
+    let Some(wizard_mode) = wizard_mode else {
+        writeln!(writer, "{}", wizard_t("wizard.step.update.cancelled")).ok();
+        return Ok(());
+    };
+
+    let resolver = env::var("GREENTIC_FLOW_WIZARD_RESOLVER")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    handle_update_step(
+        UpdateStepArgs {
+            component_id: None,
+            flow_path: flow_path.to_path_buf(),
+            step: Some(step_id.clone()),
+            mode: "default".to_string(),
+            wizard_mode: Some(wizard_mode),
+            operation: None,
+            routing_out: false,
+            routing_reply: false,
+            routing_next: None,
+            routing_multi_to: None,
+            routing_json: None,
+            answers: None,
+            answers_file: None,
+            answers_dir: None,
+            overwrite_answers: false,
+            reask: false,
+            locale: None,
+            non_interactive: false,
+            interactive: true,
+            component: source.component_ref,
+            local_wasm: source.local_wasm,
+            distributor_url: None,
+            auth_token: None,
+            tenant: None,
+            env: None,
+            pack: None,
+            component_version: None,
+            abi_version: None,
+            resolver,
+            dry_run: false,
+            write: false,
+            allow_contract_change: false,
+        },
+        SchemaMode::Strict,
+        OutputFormat::Human,
+        false,
+    )?;
+    writeln!(
+        writer,
+        "{}",
+        wizard_t_with("wizard.step.update.done", &[("step", &step_id)],)
+    )
+    .ok();
+    Ok(())
+}
+
+fn wizard_select_setup_mode<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    prefix: &str,
+) -> Result<Option<WizardModeArg>> {
+    let answers = run_questions_with_qa_lib_io(
+        &[Question {
+            id: format!("step.{prefix}.setup_mode"),
+            prompt: wizard_t("wizard.step.setup_mode.prompt"),
+            kind: greentic_flow::questions::QuestionKind::Choice,
+            required: true,
+            default: Some(serde_json::Value::String("default".to_string())),
+            choices: vec![
+                serde_json::Value::String("default".to_string()),
+                serde_json::Value::String("personalised".to_string()),
+                serde_json::Value::String("cancel".to_string()),
+            ],
+            show_if: None,
+            writes_to: None,
+        }],
+        HashMap::new(),
+        &mut *reader,
+        &mut *writer,
+    )?;
+    let mode = answers
+        .get(&format!("step.{prefix}.setup_mode"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("cancel");
+    let mapped = match mode {
+        "default" => Some(WizardModeArg::Default),
+        "personalised" => Some(WizardModeArg::Setup),
+        _ => None,
+    };
+    Ok(mapped)
+}
+
+fn wizard_generate_translations_with_io<R: Read, W: Write>(
+    pack_dir: &Path,
+    reader: &mut R,
+    writer: &mut W,
+    answers_log: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    let answers = run_questions_with_qa_lib_io(
+        &[Question {
+            id: "wizard.translate.locales".to_string(),
+            prompt: wizard_t("wizard.translate.locales.prompt"),
+            kind: greentic_flow::questions::QuestionKind::String,
+            required: true,
+            default: None,
+            choices: Vec::new(),
+            show_if: None,
+            writes_to: None,
+        }],
+        HashMap::new(),
+        &mut *reader,
+        &mut *writer,
+    )?;
+    let locales = answer_str(&answers, "wizard.translate.locales")?.to_string();
+    answers_log.insert(
+        "wizard.translate.locales".to_string(),
+        serde_json::Value::String(locales.clone()),
+    );
+    let locale_list = parse_locale_list(&locales);
+    if locale_list.is_empty() {
+        anyhow::bail!("{}", wizard_t("wizard.translate.invalid_locales"));
+    }
+
+    let en_path = pack_dir.join("i18n/en-GB.json");
+    if !en_path.exists() {
+        anyhow::bail!("{}", wizard_t("wizard.translate.missing_source"));
+    }
+    if env::var("GREENTIC_FLOW_WIZARD_TRANSLATE_STUB")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        generate_translations_stub(pack_dir, &locale_list)?;
+        writeln!(writer, "{}", wizard_t("wizard.translate.done")).ok();
+        return Ok(());
+    }
+    let i18n = greentic_i18n_translator::cli_i18n::CliI18n::from_request(Some("en"))
+        .map_err(anyhow::Error::msg)?;
+    let cli = greentic_i18n_translator::cli::Cli {
+        locale: Some("en".to_string()),
+        command: greentic_i18n_translator::cli::Command::Translate {
+            langs: locale_list.join(","),
+            en: en_path,
+            auth_mode: greentic_i18n_translator::cli::CliAuthMode::Auto,
+            codex_home: None,
+            batch_size: 50,
+            max_retries: 2,
+            glossary: None,
+            api_key_stdin: false,
+            overwrite_manual: false,
+            cache_dir: None,
+        },
+    };
+    greentic_i18n_translator::cli::run_with(cli, &i18n).map_err(anyhow::Error::msg)?;
+    writeln!(writer, "{}", wizard_t("wizard.translate.done")).ok();
+    Ok(())
+}
+
+fn parse_locale_list(raw: &str) -> Vec<String> {
+    let mut out = Vec::<String>::new();
+    for locale in raw.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+        if !out.iter().any(|existing| existing == locale) {
+            out.push(locale.to_string());
+        }
+    }
+    out
+}
+
+fn generate_translations_stub(pack_dir: &Path, locales: &[String]) -> Result<()> {
+    let i18n_dir = pack_dir.join("i18n");
+    fs::create_dir_all(&i18n_dir)
+        .with_context(|| format!("create directory {}", i18n_dir.display()))?;
+    let en_path = i18n_dir.join("en-GB.json");
+    let en_map = fs::read_to_string(&en_path)
+        .with_context(|| format!("read translation source {}", en_path.display()))
+        .and_then(|text| {
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text)
+                .context("parse source translation json")
+        })?;
+    for locale in locales {
+        if locale == "en" || locale == "en-GB" {
+            continue;
+        }
+        let mut target = serde_json::Map::new();
+        for (key, value) in &en_map {
+            let base = value.as_str().unwrap_or_default();
+            target.insert(
+                key.clone(),
+                serde_json::Value::String(format!("{base} [{locale}]")),
+            );
+        }
+        let out_path = i18n_dir.join(format!("{locale}.json"));
+        let text = serde_json::to_string_pretty(&serde_json::Value::Object(target))
+            .context("serialize stub translation json")?;
+        fs::write(&out_path, text)
+            .with_context(|| format!("write translation file {}", out_path.display()))?;
+    }
+    Ok(())
+}
+
+fn wizard_select_step_source<R: Read, W: Write>(
+    pack_dir: &Path,
+    reader: &mut R,
+    writer: &mut W,
+    ask_pin_for_remote: bool,
+) -> Result<Option<WizardStepSourceSelection>> {
+    let source_answers = run_questions_with_qa_lib_io(
+        &[Question {
+            id: "step.source.kind".to_string(),
+            prompt: wizard_t("wizard.step.source.kind.prompt"),
+            kind: greentic_flow::questions::QuestionKind::Choice,
+            required: true,
+            default: Some(serde_json::Value::String("local".to_string())),
+            choices: vec![
+                serde_json::Value::String("local".to_string()),
+                serde_json::Value::String("remote".to_string()),
+                serde_json::Value::String("cancel".to_string()),
+            ],
+            show_if: None,
+            writes_to: None,
+        }],
+        HashMap::new(),
+        &mut *reader,
+        &mut *writer,
+    )?;
+    let source_kind = source_answers
+        .get("step.source.kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("cancel");
+    if source_kind == "cancel" {
+        return Ok(None);
+    }
+
+    if source_kind == "local" {
+        let candidates = collect_pack_component_wasms(pack_dir)?;
+        let selected_path = if candidates.is_empty() {
+            let local_answers = run_questions_with_qa_lib_io(
+                &[Question {
+                    id: "step.source.local_path".to_string(),
+                    prompt: wizard_t("wizard.step.source.local.prompt"),
+                    kind: greentic_flow::questions::QuestionKind::String,
+                    required: true,
+                    default: None,
+                    choices: Vec::new(),
+                    show_if: None,
+                    writes_to: None,
+                }],
+                HashMap::new(),
+                &mut *reader,
+                &mut *writer,
+            )?;
+            PathBuf::from(answer_str(&local_answers, "step.source.local_path")?)
+        } else {
+            let mut choices = Vec::new();
+            for candidate in &candidates {
+                let display = candidate
+                    .strip_prefix(pack_dir)
+                    .unwrap_or(candidate)
+                    .display()
+                    .to_string();
+                choices.push(serde_json::Value::String(display));
+            }
+            choices.push(serde_json::Value::String("custom".to_string()));
+            choices.push(serde_json::Value::String("cancel".to_string()));
+            let choice_answers = run_questions_with_qa_lib_io(
+                &[Question {
+                    id: "step.source.local_choice".to_string(),
+                    prompt: wizard_t("wizard.step.source.local.choice.prompt"),
+                    kind: greentic_flow::questions::QuestionKind::Choice,
+                    required: true,
+                    default: choices.first().cloned(),
+                    choices: choices.clone(),
+                    show_if: None,
+                    writes_to: None,
+                }],
+                HashMap::new(),
+                &mut *reader,
+                &mut *writer,
+            )?;
+            let selected = choice_answers
+                .get("step.source.local_choice")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("cancel");
+            if selected == "cancel" {
+                return Ok(None);
+            }
+            if selected == "custom" {
+                let local_answers = run_questions_with_qa_lib_io(
+                    &[Question {
+                        id: "step.source.local_custom_path".to_string(),
+                        prompt: wizard_t("wizard.step.source.local.prompt"),
+                        kind: greentic_flow::questions::QuestionKind::String,
+                        required: true,
+                        default: None,
+                        choices: Vec::new(),
+                        show_if: None,
+                        writes_to: None,
+                    }],
+                    HashMap::new(),
+                    &mut *reader,
+                    &mut *writer,
+                )?;
+                PathBuf::from(answer_str(&local_answers, "step.source.local_custom_path")?)
+            } else {
+                let rel = PathBuf::from(selected);
+                if rel.is_absolute() {
+                    rel
+                } else {
+                    pack_dir.join(rel)
+                }
+            }
+        };
+        let copied_local = copy_local_wasm_into_pack_components(pack_dir, &selected_path)?;
+        return Ok(Some(WizardStepSourceSelection {
+            local_wasm: Some(copied_local),
+            component_ref: None,
+            pin: true,
+        }));
+    }
+
+    let ref_answers = run_questions_with_qa_lib_io(
+        &[Question {
+            id: "step.source.remote_ref".to_string(),
+            prompt: wizard_t("wizard.step.source.remote.prompt"),
+            kind: greentic_flow::questions::QuestionKind::String,
+            required: true,
+            default: None,
+            choices: Vec::new(),
+            show_if: None,
+            writes_to: None,
+        }],
+        HashMap::new(),
+        &mut *reader,
+        &mut *writer,
+    )?;
+    let remote_ref = answer_str(&ref_answers, "step.source.remote_ref")?.to_string();
+    let pin = if ask_pin_for_remote {
+        let pin_answers = run_questions_with_qa_lib_io(
+            &[Question {
+                id: "step.source.remote_pin".to_string(),
+                prompt: wizard_t("wizard.step.source.remote.pin.prompt"),
+                kind: greentic_flow::questions::QuestionKind::Choice,
+                required: true,
+                default: Some(serde_json::Value::String("yes".to_string())),
+                choices: vec![
+                    serde_json::Value::String("yes".to_string()),
+                    serde_json::Value::String("no".to_string()),
+                ],
+                show_if: None,
+                writes_to: None,
+            }],
+            HashMap::new(),
+            &mut *reader,
+            &mut *writer,
+        )?;
+        pin_answers
+            .get("step.source.remote_pin")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("yes")
+            == "yes"
+    } else {
+        false
+    };
+    Ok(Some(WizardStepSourceSelection {
+        local_wasm: None,
+        component_ref: Some(remote_ref),
+        pin,
+    }))
+}
+
+fn copy_local_wasm_into_pack_components(pack_dir: &Path, selected_path: &Path) -> Result<PathBuf> {
+    let src_abs = if selected_path.is_absolute() {
+        selected_path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("resolve current directory")?
+            .join(selected_path)
+    };
+    let src_abs = fs::canonicalize(&src_abs)
+        .with_context(|| format!("resolve local wasm path {}", src_abs.display()))?;
+    if !src_abs.exists() {
+        anyhow::bail!(
+            "{}",
+            wizard_t_with(
+                "wizard.error.local_wasm_missing",
+                &[("path", &src_abs.display().to_string())]
+            )
+        );
+    }
+    let components_dir = pack_dir.join("components");
+    fs::create_dir_all(&components_dir)
+        .with_context(|| format!("create directory {}", components_dir.display()))?;
+    let digest = compute_local_digest(&src_abs)?;
+    let stem = src_abs
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|v| !v.is_empty())
+        .unwrap_or("component");
+    let dest = components_dir.join(format!("{stem}-{}.wasm", &digest[..12]));
+    if !dest.exists() {
+        fs::copy(&src_abs, &dest)
+            .with_context(|| format!("copy wasm {} -> {}", src_abs.display(), dest.display()))?;
+    }
+    Ok(dest)
+}
+
+fn collect_pack_component_wasms(pack_dir: &Path) -> Result<Vec<PathBuf>> {
+    let components_dir = pack_dir.join("components");
+    if !components_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    collect_component_wasms_recursive(&components_dir, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn collect_component_wasms_recursive(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if root.is_file() {
+        if root.extension() == Some(OsStr::new("wasm")) {
+            out.push(root.to_path_buf());
+        }
+        return Ok(());
+    }
+    if !root.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).with_context(|| format!("read directory {}", root.display()))? {
+        let entry = entry.with_context(|| format!("read entry under {}", root.display()))?;
+        collect_component_wasms_recursive(&entry.path(), out)?;
+    }
+    Ok(())
+}
+
+fn answer_str<'a>(answers: &'a HashMap<String, serde_json::Value>, key: &str) -> Result<&'a str> {
+    answers
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!(
+                "{}",
+                wizard_t_with("wizard.error.missing_required_answer", &[("key", key)])
+            )
+        })
+}
+
+fn flow_id_from_name(name: &str) -> Result<String> {
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|v| v.to_str())
+        .unwrap_or(name)
+        .trim();
+    if stem.is_empty() {
+        anyhow::bail!("{}", wizard_t("wizard.error.flow_name_empty"));
+    }
+    Ok(stem.replace(' ', "-"))
+}
+
+fn ensure_ygtc_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{}", wizard_t("wizard.error.flow_name_empty"));
+    }
+    if trimmed.ends_with(".ygtc") {
+        Ok(trimmed.to_string())
+    } else {
+        Ok(format!("{trimmed}.ygtc"))
+    }
+}
+
+fn build_add_flow_relative_path(
+    scope: &str,
+    tenant_id: Option<&str>,
+    team_scope: Option<&str>,
+    team_id: Option<&str>,
+    flow_type: &str,
+    flow_name: &str,
+) -> Result<PathBuf> {
+    if flow_type != "messaging" && flow_type != "events" {
+        anyhow::bail!(
+            "{}",
+            wizard_t_with(
+                "wizard.error.flow_type_unsupported",
+                &[("flow_type", flow_type)]
+            )
+        );
+    }
+    let file_name = ensure_ygtc_name(flow_name)?;
+    let path = match scope {
+        "global" => PathBuf::from("flows")
+            .join("global")
+            .join(flow_type)
+            .join(file_name),
+        "tenant" => {
+            let tenant = tenant_id
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.tenant_id_required")))?;
+            let team_segment = match team_scope {
+                Some("all-teams") | None => "all-teams".to_string(),
+                Some("specific-team") => {
+                    let team = team_id
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| anyhow!("{}", wizard_t("wizard.error.team_id_required")))?;
+                    team.to_string()
+                }
+                Some(other) => {
+                    anyhow::bail!(
+                        "{}",
+                        wizard_t_with("wizard.error.team_scope_unsupported", &[("scope", other)])
+                    )
+                }
+            };
+            PathBuf::from("flows")
+                .join(tenant)
+                .join(team_segment)
+                .join(flow_type)
+                .join(file_name)
+        }
+        other => {
+            anyhow::bail!(
+                "{}",
+                wizard_t_with("wizard.error.flow_scope_unsupported", &[("scope", other)])
+            )
+        }
+    };
+    Ok(path)
+}
+
+fn wizard_catalog_for_locale(locale: &str) -> I18nCatalog {
+    static CATALOGS: OnceLock<Mutex<HashMap<String, I18nCatalog>>> = OnceLock::new();
+    let catalogs = CATALOGS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = catalogs.lock().expect("wizard catalogs lock");
+    if let Some(cached) = guard.get(locale) {
+        return cached.clone();
+    }
+    let mut catalog = I18nCatalog::default();
+    merge_wizard_i18n_json_embedded(&mut catalog, "en");
+    if locale != "en" {
+        merge_wizard_i18n_json_embedded(&mut catalog, locale);
+    }
+    if let Some((language, _)) = locale.split_once('-')
+        && !language.is_empty()
+        && language != locale
+        && language != "en"
+    {
+        merge_wizard_i18n_json_embedded(&mut catalog, language);
+    }
+    guard.insert(locale.to_string(), catalog.clone());
+    catalog
+}
+
+fn wizard_resolved_map_for_locale(locale: &str) -> std::collections::BTreeMap<String, String> {
+    static RESOLVED: OnceLock<Mutex<HashMap<String, std::collections::BTreeMap<String, String>>>> =
+        OnceLock::new();
+    let resolved_cache = RESOLVED.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = resolved_cache.lock().expect("wizard resolved map lock");
+    if let Some(cached) = guard.get(locale) {
+        return cached.clone();
+    }
+    let catalog = wizard_catalog_for_locale(locale);
+    let mut resolved = std::collections::BTreeMap::new();
+    for key in embedded_wizard_keys() {
+        let value = resolve_cli_text(&catalog, locale, &key, &key);
+        if value != key {
+            resolved.insert(key.clone(), value.clone());
+            resolved.insert(format!("{locale}:{key}"), value.clone());
+            resolved.insert(format!("{locale}/{key}"), value);
+        }
+    }
+    guard.insert(locale.to_string(), resolved.clone());
+    resolved
+}
+
+fn wizard_qa_i18n_config_for_locale(locale: &str) -> QaI18nConfig {
+    QaI18nConfig {
+        locale: Some(locale.to_string()),
+        resolved: Some(wizard_resolved_map_for_locale(locale)),
+        debug: false,
+    }
+}
+
+fn merge_wizard_i18n_json_embedded(catalog: &mut I18nCatalog, locale: &str) {
+    let file_name = format!("{locale}.json");
+    let Some(file) = EMBEDDED_WIZARD_I18N_DIR.get_file(&file_name) else {
+        return;
+    };
+    let Some(text) = file.contents_utf8() else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return;
+    };
+    let Some(entries) = value.as_object() else {
+        return;
+    };
+    for (key, value) in entries {
+        if let Some(message) = value.as_str() {
+            catalog.insert(key.clone(), locale.to_string(), message.to_string());
+        }
+    }
+}
+
+fn embedded_wizard_keys() -> Vec<String> {
+    let file = EMBEDDED_WIZARD_I18N_DIR
+        .get_file("en.json")
+        .or_else(|| EMBEDDED_WIZARD_I18N_DIR.get_file("en-GB.json"));
+    let Some(file) = file else {
+        return Vec::new();
+    };
+    let Some(text) = file.contents_utf8() else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(entries) = value.as_object() else {
+        return Vec::new();
+    };
+    entries.keys().cloned().collect()
+}
+
+fn wizard_t(key: &str) -> String {
+    let locale = resolve_locale(None);
+    let catalog = wizard_catalog_for_locale(&locale);
+    let value = resolve_cli_text(&catalog, &locale, key, key);
+    if value == key {
+        format!("[[missing:{key}]]")
+    } else {
+        value
+    }
+}
+
+fn wizard_t_with(key: &str, replacements: &[(&str, &str)]) -> String {
+    let mut value = wizard_t(key);
+    for (name, replacement) in replacements {
+        value = value.replace(&format!("{{{name}}}"), replacement);
+    }
+    value
 }
 
 fn handle_doctor(args: DoctorArgs, schema_mode: SchemaMode) -> Result<()> {
@@ -1099,24 +3389,16 @@ fn handle_doctor(args: DoctorArgs, schema_mode: SchemaMode) -> Result<()> {
 }
 
 fn handle_new(args: NewArgs, backup: bool) -> Result<()> {
-    let doc = greentic_flow::model::FlowDoc {
-        id: args.flow_id.clone(),
-        title: args.name,
-        description: args.description,
+    write_new_flow_file(NewFlowFileSpec {
+        flow_path: args.flow_path.clone(),
+        flow_id: args.flow_id.clone(),
         flow_type: args.flow_type.clone(),
-        start: None,
-        parameters: serde_json::Value::Object(Default::default()),
-        tags: Vec::new(),
-        schema_version: Some(args.schema_version),
-        entrypoints: IndexMap::new(),
-        meta: None,
-        nodes: IndexMap::new(),
-    };
-    let mut yaml = serde_yaml_bw::to_string(&doc)?;
-    if !yaml.ends_with('\n') {
-        yaml.push('\n');
-    }
-    write_flow_file(&args.flow_path, &yaml, args.force, backup)?;
+        schema_version: args.schema_version,
+        name: args.name,
+        description: args.description,
+        force: args.force,
+        backup,
+    })?;
     println!(
         "Created flow '{}' at {} (type: {})",
         args.flow_id,
@@ -1603,6 +3885,14 @@ fn lint_file(
         Ok(result) => {
             let mut had_errors = false;
             if result.lint_errors.is_empty() {
+                let i18n_tag_errors = lint_i18n_tag_fields(path);
+                if !i18n_tag_errors.is_empty() {
+                    *failures += 1;
+                    had_errors = true;
+                    for err in i18n_tag_errors {
+                        eprintln!("ERR  {}: {err}", path.display());
+                    }
+                }
                 if result.bundle.kind != "component-config" {
                     let validation =
                         validate_sidecar_for_flow(path, &result.flow, interactive, true)?;
@@ -1656,6 +3946,66 @@ fn lint_file(
         }
     }
     Ok(())
+}
+
+fn lint_i18n_tag_fields(path: &Path) -> Vec<String> {
+    let mut errors = Vec::new();
+    let Ok(doc) = load_ygtc_from_path(path) else {
+        return errors;
+    };
+    let i18n_source = load_pack_i18n_source_for_flow(path);
+    if let Some(title) = doc.title.as_deref() {
+        lint_i18n_tag_value("title", title, i18n_source.as_ref(), &mut errors);
+    }
+    if let Some(description) = doc.description.as_deref() {
+        lint_i18n_tag_value(
+            "description",
+            description,
+            i18n_source.as_ref(),
+            &mut errors,
+        );
+    }
+    errors
+}
+
+fn lint_i18n_tag_value(
+    field: &str,
+    value: &str,
+    i18n_source: Option<&serde_json::Map<String, serde_json::Value>>,
+    errors: &mut Vec<String>,
+) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let Some(key) = trimmed.strip_prefix("i18n:") else {
+        errors.push(format!(
+            "{field} must be an i18n tag (expected prefix i18n:)"
+        ));
+        return;
+    };
+    let key = key.trim();
+    if key.is_empty() {
+        errors.push(format!("{field} i18n tag key cannot be empty"));
+        return;
+    }
+    if let Some(source) = i18n_source {
+        match source.get(key).and_then(serde_json::Value::as_str) {
+            Some(v) if !v.trim().is_empty() => {}
+            _ => errors.push(format!(
+                "{field} i18n key '{key}' missing from pack i18n/en-GB.json"
+            )),
+        }
+    }
+}
+
+fn load_pack_i18n_source_for_flow(
+    path: &Path,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let pack_root = infer_pack_root_from_flow_path(path).ok()?;
+    let i18n_path = pack_root.join("i18n/en-GB.json");
+    let text = fs::read_to_string(i18n_path).ok()?;
+    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&text).ok()
 }
 
 struct LintResult {
@@ -1901,6 +4251,8 @@ fn run_json(
                             validation.invalid.join(", ")
                         ));
                     }
+                    let i18n_errors = lint_i18n_tag_fields(path);
+                    errors.extend(i18n_errors);
                     if errors.is_empty() {
                         LintJsonOutput::success(result.bundle)
                     } else {
@@ -1984,6 +4336,9 @@ mod tests {
     use serde_json::json;
     use std::env;
     use std::fs;
+    use std::io::Cursor;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
     use tempfile::NamedTempFile;
     use tempfile::tempdir;
 
@@ -1992,6 +4347,962 @@ mod tests {
             .get("config")
             .and_then(|value| value.as_object().map(|_| value))
             .unwrap_or(payload)
+    }
+
+    fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env test lock")
+    }
+
+    #[test]
+    fn wizard_menu_main_zero_exits() {
+        let dir = tempdir().expect("temp dir");
+        let input = Cursor::new("0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output).expect("wizard exit");
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("Main Menu"));
+    }
+
+    #[test]
+    fn wizard_menu_m_returns_to_main_menu() {
+        let dir = tempdir().expect("temp dir");
+        let flows_dir = dir.path().join("flows");
+        fs::create_dir_all(&flows_dir).expect("create flows dir");
+        fs::write(
+            flows_dir.join("sample.ygtc"),
+            "id: sample\ntype: messaging\nnodes: {}\n",
+        )
+        .expect("write flow");
+
+        // 2 => edit/delete flows, M => main menu, 0 => exit
+        let input = Cursor::new("2\nM\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output).expect("wizard navigation");
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("Select number of flow"));
+        assert!(rendered.matches("Main Menu").count() >= 2);
+    }
+
+    #[test]
+    fn wizard_menu_flow_ops_zero_returns_to_flow_select() {
+        let dir = tempdir().expect("temp dir");
+        let flows_dir = dir.path().join("flows");
+        fs::create_dir_all(&flows_dir).expect("create flows dir");
+        fs::write(
+            flows_dir.join("sample.ygtc"),
+            "id: sample\ntype: messaging\nnodes: {}\n",
+        )
+        .expect("write flow");
+
+        // 2 => flow list, 1 => flow ops, 0 => back to flow list, 0 => main, 0 => exit.
+        let input = Cursor::new("2\n1\n0\n0\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+            .expect("wizard flow-ops back");
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("Select number of flow"));
+        assert!(rendered.contains("Select operation"));
+    }
+
+    #[test]
+    fn wizard_menu_flow_ops_m_returns_to_main_menu() {
+        let dir = tempdir().expect("temp dir");
+        let flows_dir = dir.path().join("flows");
+        fs::create_dir_all(&flows_dir).expect("create flows dir");
+        fs::write(
+            flows_dir.join("sample.ygtc"),
+            "id: sample\ntype: messaging\nnodes: {}\n",
+        )
+        .expect("write flow");
+
+        // 2 => flow list, 1 => flow ops, M => main, 0 => exit.
+        let input = Cursor::new("2\n1\nM\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+            .expect("wizard flow-ops main menu");
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.matches("Main Menu").count() >= 2);
+    }
+
+    #[test]
+    fn wizard_generate_translations_requires_source_bundle() {
+        let dir = tempdir().expect("temp dir");
+        let input = Cursor::new("3\nes\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+            .expect("wizard should continue after translation error");
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("missing i18n/en-GB.json"));
+    }
+
+    #[test]
+    fn wizard_generate_translations_stub_writes_locale_files() {
+        let _guard = env_test_lock();
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("i18n")).expect("create i18n");
+        fs::write(
+            dir.path().join("i18n/en-GB.json"),
+            r#"{"wizard.hello":"Hello"}"#,
+        )
+        .expect("write source bundle");
+
+        let previous = env::var("GREENTIC_FLOW_WIZARD_TRANSLATE_STUB").ok();
+        unsafe {
+            env::set_var("GREENTIC_FLOW_WIZARD_TRANSLATE_STUB", "1");
+        }
+        let mut input = Cursor::new("es,fr\n");
+        let mut output = Vec::new();
+        let mut answers_log = serde_json::Map::new();
+        super::wizard_generate_translations_with_io(
+            dir.path(),
+            &mut input,
+            &mut output,
+            &mut answers_log,
+        )
+        .expect("generate translations (stub)");
+        if let Some(value) = previous {
+            unsafe {
+                env::set_var("GREENTIC_FLOW_WIZARD_TRANSLATE_STUB", value);
+            }
+        } else {
+            unsafe {
+                env::remove_var("GREENTIC_FLOW_WIZARD_TRANSLATE_STUB");
+            }
+        }
+
+        let es_text = fs::read_to_string(dir.path().join("i18n/es.json")).expect("read es");
+        let fr_text = fs::read_to_string(dir.path().join("i18n/fr.json")).expect("read fr");
+        assert!(es_text.contains("Hello [es]"));
+        assert!(fr_text.contains("Hello [fr]"));
+    }
+
+    #[test]
+    fn wizard_menu_generate_translations_pack_wide_and_save() {
+        let _guard = env_test_lock();
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("i18n")).expect("create i18n");
+        fs::write(
+            dir.path().join("i18n/en-GB.json"),
+            r#"{"flow.alpha.title":"Alpha","flow.beta.title":"Beta"}"#,
+        )
+        .expect("write source bundle");
+
+        let previous = env::var("GREENTIC_FLOW_WIZARD_TRANSLATE_STUB").ok();
+        unsafe {
+            env::set_var("GREENTIC_FLOW_WIZARD_TRANSLATE_STUB", "1");
+        }
+
+        // 3=Generate translations, enter locales, 4=Save, enter default answers path, 0=Exit.
+        let input = Cursor::new("3\nes,fr\n4\n\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+            .expect("wizard menu generate translations");
+
+        if let Some(value) = previous {
+            unsafe {
+                env::set_var("GREENTIC_FLOW_WIZARD_TRANSLATE_STUB", value);
+            }
+        } else {
+            unsafe {
+                env::remove_var("GREENTIC_FLOW_WIZARD_TRANSLATE_STUB");
+            }
+        }
+
+        let es_text = fs::read_to_string(dir.path().join("i18n/es.json")).expect("read es");
+        let fr_text = fs::read_to_string(dir.path().join("i18n/fr.json")).expect("read fr");
+        let es_json: serde_json::Value = serde_json::from_str(&es_text).expect("parse es");
+        let fr_json: serde_json::Value = serde_json::from_str(&fr_text).expect("parse fr");
+        assert!(
+            es_json
+                .get("flow.alpha.title")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+        assert!(
+            es_json
+                .get("flow.beta.title")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+        assert!(
+            fr_json
+                .get("flow.alpha.title")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+        assert!(
+            fr_json
+                .get("flow.beta.title")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn wizard_i18n_smoke_no_missing_key_markers() {
+        let keys = [
+            "wizard.menu.main.prompt",
+            "wizard.menu.flow_select.title",
+            "wizard.menu.flow_ops.prompt",
+            "wizard.menu.nav.back",
+            "wizard.menu.nav.main",
+            "wizard.add_flow.scope.prompt",
+            "wizard.add_flow.created",
+            "wizard.flow.summary.name.prompt",
+            "wizard.flow.summary.edit.prompt",
+            "wizard.flow.summary.current_name",
+            "wizard.flow.summary.current_description",
+            "wizard.flow.summary.not_set",
+            "wizard.flow.summary.updated",
+            "wizard.flow.delete.confirm.prompt",
+            "wizard.flow.delete.deleted",
+            "wizard.step.add.after.prompt",
+            "wizard.step.add.done",
+            "wizard.step.update.select.prompt",
+            "wizard.step.update.done",
+            "wizard.step.setup_mode.prompt",
+            "wizard.step.source.kind.prompt",
+            "wizard.step.source.local.prompt",
+            "wizard.step.source.remote.prompt",
+            "wizard.save.done",
+            "wizard.save.dry_run_done",
+            "wizard.answers.path.prompt",
+            "wizard.translate.locales.prompt",
+            "wizard.translate.done",
+            "wizard.translate.missing_source",
+            "wizard.translate.invalid_locales",
+            "wizard.step.delete.prompt",
+            "wizard.step.delete.deleted",
+            "wizard.error.pack_dir_not_found",
+            "wizard.error.missing_answer_for_question",
+            "wizard.error.flow_path_has_no_pack_root",
+            "wizard.error.cannot_infer_pack_root",
+            "wizard.error.local_wasm_missing",
+            "wizard.error.missing_required_answer",
+            "wizard.error.flow_name_empty",
+            "wizard.error.flow_type_unsupported",
+            "wizard.error.tenant_id_required",
+            "wizard.error.team_id_required",
+            "wizard.error.team_scope_unsupported",
+            "wizard.error.flow_scope_unsupported",
+            "wizard.error.invalid_choice",
+            "wizard.error.required_input",
+            "wizard.error.invalid_integer",
+            "wizard.error.invalid_number",
+            "wizard.error.number_out_of_range",
+            "wizard.error.enum_choices_missing",
+            "wizard.error.invalid_utf8_input",
+            "wizard.error.qa_runner_failed",
+            "wizard.qa.prompt.select_option",
+            "wizard.qa.prompt.enter_true_false",
+            "wizard.qa.prompt.enter_number",
+            "wizard.qa.prompt.enter_integer",
+            "wizard.qa.prompt.enter_text",
+            "wizard.choice.flow.scope.global",
+            "wizard.choice.flow.scope.tenant",
+            "wizard.choice.flow.team_scope.all_teams",
+            "wizard.choice.flow.team_scope.specific_team",
+            "wizard.choice.flow.type.messaging",
+            "wizard.choice.flow.type.events",
+            "wizard.choice.common.yes",
+            "wizard.choice.common.no",
+            "wizard.choice.common.cancel",
+            "wizard.choice.setup.default",
+            "wizard.choice.setup.personalised",
+            "wizard.choice.source.local",
+            "wizard.choice.source.remote",
+            "wizard.choice.source.custom",
+            "wizard.choice.step.after.auto",
+        ];
+        for key in keys {
+            let value = super::wizard_t(key);
+            assert!(
+                !value.contains("[[missing:"),
+                "expected key to resolve without missing marker: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_flow_path_global_messaging() {
+        let path =
+            super::build_add_flow_relative_path("global", None, None, None, "messaging", "welcome")
+                .expect("global path");
+        assert_eq!(path, PathBuf::from("flows/global/messaging/welcome.ygtc"));
+    }
+
+    #[test]
+    fn add_flow_path_tenant_all_teams_events() {
+        let path = super::build_add_flow_relative_path(
+            "tenant",
+            Some("tenant-a"),
+            Some("all-teams"),
+            None,
+            "events",
+            "audit",
+        )
+        .expect("tenant all-teams path");
+        assert_eq!(
+            path,
+            PathBuf::from("flows/tenant-a/all-teams/events/audit.ygtc")
+        );
+    }
+
+    #[test]
+    fn add_flow_path_tenant_specific_team() {
+        let path = super::build_add_flow_relative_path(
+            "tenant",
+            Some("tenant-a"),
+            Some("specific-team"),
+            Some("blue"),
+            "messaging",
+            "alerts",
+        )
+        .expect("tenant team path");
+        assert_eq!(
+            path,
+            PathBuf::from("flows/tenant-a/blue/messaging/alerts.ygtc")
+        );
+    }
+
+    #[test]
+    fn add_flow_path_rejects_unknown_type() {
+        let err = super::build_add_flow_relative_path("global", None, None, None, "http", "x")
+            .expect_err("invalid type");
+        assert!(err.to_string().to_lowercase().contains("flow type"));
+    }
+
+    #[test]
+    fn wizard_add_flow_menu_creates_global_flow() {
+        let dir = tempdir().expect("temp dir");
+        // main menu=1(add flow), scope=1(global), type=1(messaging), name=welcome, save(default answers path), then 0(exit)
+        let input = Cursor::new("1\n1\n1\nwelcome\n4\n\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output).expect("wizard add flow");
+        let path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        assert!(path.exists(), "expected flow file {}", path.display());
+    }
+
+    #[test]
+    fn wizard_flow_summary_menu_updates_title_and_description() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: Some("Old Name".to_string()),
+                description: Some("Old Description".to_string()),
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        // 2 flow list, 1 select flow, 1 summary, provide new name/desc, 6 save, then back/back/exit
+        let input = Cursor::new("2\n1\n1\n2\nNew Name\nNew Description\n6\n\n0\n0\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+            .expect("wizard summary update");
+        let output_text = String::from_utf8_lossy(&output);
+        assert!(output_text.contains("Current name/title: Old Name"));
+        assert!(output_text.contains("Current description: Old Description"));
+
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        assert_eq!(doc.title.as_deref(), Some("i18n:flow.welcome.title"));
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("i18n:flow.welcome.description")
+        );
+        let i18n_map: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.path().join("i18n/en-GB.json")).expect("read i18n"),
+        )
+        .expect("parse i18n");
+        assert_eq!(
+            i18n_map.get("flow.welcome.title").and_then(|v| v.as_str()),
+            Some("New Name")
+        );
+        assert_eq!(
+            i18n_map
+                .get("flow.welcome.description")
+                .and_then(|v| v.as_str()),
+            Some("New Description")
+        );
+    }
+
+    #[test]
+    fn wizard_flow_summary_shows_resolved_i18n_values() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/main.ygtc");
+        if let Some(parent) = flow_path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::write(
+            &flow_path,
+            r#"id: main
+type: messaging
+schema_version: 2
+title: i18n:flow.misc.title
+description: i18n:flow.misc.description
+nodes: {}
+"#,
+        )
+        .expect("write flow");
+        fs::create_dir_all(dir.path().join("i18n")).expect("create i18n dir");
+        fs::write(
+            dir.path().join("i18n/en-GB.json"),
+            r#"{
+  "flow.misc.title": "Best flow title",
+  "flow.misc.description": "The best flow ever"
+}"#,
+        )
+        .expect("write i18n");
+
+        let mut input = Cursor::new("1\n");
+        let mut output = Vec::new();
+        super::wizard_edit_flow_summary_with_io(&flow_path, &mut input, &mut output)
+            .expect("summary view");
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("Current name/title: Best flow title"));
+        assert!(rendered.contains("Current description: The best flow ever"));
+        assert!(!rendered.contains("Current name/title: i18n:flow.misc.title"));
+        assert!(!rendered.contains("Current description: i18n:flow.misc.description"));
+    }
+
+    #[test]
+    fn wizard_changes_without_save_are_discarded() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: Some("Old Name".to_string()),
+                description: Some("Old Description".to_string()),
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        // 2 flow list, 1 select flow, 1 summary edit, change fields, then back to main and exit without save.
+        let input = Cursor::new("2\n1\n1\n2\nDraft Name\nDraft Description\n0\n0\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+            .expect("wizard summary update without save");
+
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        assert_eq!(doc.title.as_deref(), Some("Old Name"));
+        assert_eq!(doc.description.as_deref(), Some("Old Description"));
+    }
+
+    #[test]
+    fn wizard_save_persists_changes() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: Some("Old Name".to_string()),
+                description: Some("Old Description".to_string()),
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        // 2 flow list, 1 select flow, 1 summary edit, then 6 save, back to main and exit.
+        let input = Cursor::new("2\n1\n1\n2\nNew Name\nNew Description\n6\n\n0\n0\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+            .expect("wizard summary update with save");
+
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        assert_eq!(doc.title.as_deref(), Some("i18n:flow.welcome.title"));
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("i18n:flow.welcome.description")
+        );
+    }
+
+    #[test]
+    fn wizard_save_doctor_failure_does_not_persist() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: None,
+                description: None,
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        with_wizard_resolver_env(fixture_registry_resolver(), || {
+            // Add step with fixture oci ref, try save (doctor should fail on sidecar ref validation), then exit.
+            // No anchor prompt is shown when the flow has no steps.
+            let input = Cursor::new("2\n1\n2\n2\noci://acme/widget:1\n2\n1\n6\n\n0\n0\n0\n");
+            let mut output = Vec::new();
+            super::run_wizard_menu_with_io(dir.path(), input, &mut output).expect("wizard run");
+            let rendered = String::from_utf8(output).expect("utf8");
+            assert!(rendered.contains("Save blocked: doctor failed"));
+            assert!(rendered.contains("Select operation"));
+        });
+
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
+        assert!(flow_ir.nodes.is_empty(), "failed save should not persist");
+    }
+
+    #[test]
+    fn wizard_save_default_answers_path_writes_file() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: Some("Old Name".to_string()),
+                description: Some("Old Description".to_string()),
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        let input = Cursor::new("2\n1\n1\n2\nNew Name\nNew Description\n6\n\n0\n0\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output).expect("wizard save");
+        let answers_path = dir.path().join("answers.json");
+        assert!(
+            answers_path.exists(),
+            "default answers file should be written"
+        );
+    }
+
+    #[test]
+    fn wizard_save_custom_answers_path_writes_file() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: Some("Old Name".to_string()),
+                description: Some("Old Description".to_string()),
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        let input = Cursor::new(
+            "2\n1\n1\n2\nNew Name\nNew Description\n6\nartifacts/answers-out.json\n0\n0\n0\n",
+        );
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output).expect("wizard save");
+        let answers_path = dir.path().join("artifacts/answers-out.json");
+        assert!(
+            answers_path.exists(),
+            "custom answers file should be written"
+        );
+    }
+
+    #[test]
+    fn wizard_dry_run_does_not_persist_flow_but_writes_answers_file() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: Some("Old Name".to_string()),
+                description: Some("Old Description".to_string()),
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        let answers_path = dir.path().join("dry-run-answers.json");
+        let input = Cursor::new("2\n1\n1\n2\nDry Name\nDry Description\n6\n0\n0\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_config(
+            dir.path(),
+            input,
+            &mut output,
+            super::WizardRunConfig {
+                answers_file: Some(answers_path.clone()),
+                dry_run: true,
+            },
+        )
+        .expect("wizard dry-run save");
+
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        assert_eq!(doc.title.as_deref(), Some("Old Name"));
+        assert_eq!(doc.description.as_deref(), Some("Old Description"));
+        assert!(
+            answers_path.exists(),
+            "answers file should be written in dry-run"
+        );
+    }
+
+    #[test]
+    fn wizard_delete_flow_cancelled_keeps_file() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: None,
+                description: None,
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+        let mut input = Cursor::new("1\n");
+        let mut output = Vec::new();
+        super::wizard_delete_flow_with_io(&flow_path, &mut input, &mut output)
+            .expect("delete prompt");
+        assert!(flow_path.exists(), "flow should remain after cancel");
+    }
+
+    #[test]
+    fn wizard_menu_delete_flow_removes_file() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: None,
+                description: None,
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        // 2 flow list, 1 select flow, 5 delete, 2 yes, then 0 back to main, 4 save(default answers path), 0 exit
+        let input = Cursor::new("2\n1\n5\n2\n0\n4\n\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output).expect("wizard delete flow");
+        assert!(!flow_path.exists(), "flow should be deleted");
+    }
+
+    fn write_two_step_flow(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent");
+        }
+        fs::write(
+            path,
+            r#"id: main
+type: messaging
+schema_version: 2
+nodes:
+  first:
+    op: {}
+    routing:
+    - to: second
+  second:
+    op: {}
+    routing:
+    - out: true
+"#,
+        )
+        .expect("write two-step flow");
+        let sidecar_path = super::sidecar_path_for_flow(path);
+        fs::write(
+            sidecar_path,
+            r#"{
+  "schema_version": 1,
+  "flow": "welcome.ygtc",
+  "nodes": {
+    "first": {
+      "source": { "kind": "repo", "ref": "repo://placeholder/first" }
+    },
+    "second": {
+      "source": { "kind": "repo", "ref": "repo://placeholder/second" }
+    }
+  }
+}"#,
+        )
+        .expect("write sidecar");
+    }
+
+    #[test]
+    fn wizard_delete_step_removes_selected_node() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        write_two_step_flow(&flow_path);
+        let mut input = Cursor::new("first\n");
+        let mut output = Vec::new();
+        super::wizard_delete_step_with_io(&flow_path, &mut input, &mut output)
+            .expect("delete step");
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
+        assert!(!flow_ir.nodes.contains_key("first"));
+        assert!(flow_ir.nodes.contains_key("second"));
+    }
+
+    #[test]
+    fn wizard_menu_delete_step_path_removes_node() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        write_two_step_flow(&flow_path);
+        // 2 flow list, 1 select flow, 4 delete-step, first, 6 save, then 0(back) 0(main) 0(exit)
+        let input = Cursor::new("2\n1\n4\nfirst\n6\n\n0\n0\n0\n");
+        let mut output = Vec::new();
+        super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+            .expect("wizard menu delete step");
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
+        assert!(!flow_ir.nodes.contains_key("first"));
+        assert!(flow_ir.nodes.contains_key("second"));
+    }
+
+    #[test]
+    fn doctor_lints_raw_summary_literals() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: Some("Raw Name".to_string()),
+                description: Some("Raw Description".to_string()),
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+        let errors = super::lint_i18n_tag_fields(&flow_path);
+        assert!(!errors.is_empty(), "expected i18n tag lint errors");
+    }
+
+    fn with_wizard_resolver_env<F: FnOnce()>(resolver: String, run: F) {
+        let _guard = env_test_lock();
+        let previous = env::var("GREENTIC_FLOW_WIZARD_RESOLVER").ok();
+        unsafe {
+            env::set_var("GREENTIC_FLOW_WIZARD_RESOLVER", resolver);
+        }
+        run();
+        if let Some(value) = previous {
+            unsafe {
+                env::set_var("GREENTIC_FLOW_WIZARD_RESOLVER", value);
+            }
+        } else {
+            unsafe {
+                env::remove_var("GREENTIC_FLOW_WIZARD_RESOLVER");
+            }
+        }
+    }
+
+    #[test]
+    fn wizard_menu_add_step_remote_fixture() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: None,
+                description: None,
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+
+        with_wizard_resolver_env(fixture_registry_resolver(), || {
+            // 2 flow list, 1 flow, 2 add step, 2 remote, ref, 2 no-pin, 1 default mode, then back/main/exit.
+            // No anchor prompt is shown when the flow has no steps.
+            let input = Cursor::new("2\n1\n2\n2\noci://acme/widget:1\n2\n1\n0\n0\n0\n");
+            let mut output = Vec::new();
+            super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+                .expect("wizard menu add step");
+            let rendered = String::from_utf8(output).expect("utf8");
+            assert!(rendered.contains("Step added."));
+        });
+
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
+        assert!(
+            flow_ir.nodes.is_empty(),
+            "changes should not persist without save"
+        );
+    }
+
+    #[test]
+    fn wizard_add_step_anchor_no_nodes_defaults_to_auto_without_prompt() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: None,
+                description: None,
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
+        let mut input = Cursor::new("");
+        let mut output = Vec::new();
+        let selected =
+            super::wizard_select_add_step_anchor_with_io(&flow_ir, &mut input, &mut output)
+                .expect("select anchor");
+        assert_eq!(selected, None);
+        assert!(output.is_empty(), "no anchor prompt should be rendered");
+    }
+
+    #[test]
+    fn wizard_add_step_anchor_multiple_nodes_uses_numbered_selection() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        write_two_step_flow(&flow_path);
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
+        let mut input = Cursor::new("3\n");
+        let mut output = Vec::new();
+        let selected =
+            super::wizard_select_add_step_anchor_with_io(&flow_ir, &mut input, &mut output)
+                .expect("select anchor");
+        assert_eq!(selected.as_deref(), Some("second"));
+        let rendered = String::from_utf8(output).expect("utf8");
+        assert!(rendered.contains("1. Auto"));
+        assert!(rendered.contains("2. first"));
+        assert!(rendered.contains("3. second"));
+    }
+
+    #[test]
+    fn wizard_menu_update_step_remote_fixture() {
+        let dir = tempdir().expect("temp dir");
+        let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+        handle_new(
+            NewArgs {
+                flow_path: flow_path.clone(),
+                flow_id: "welcome".to_string(),
+                flow_type: "messaging".to_string(),
+                schema_version: 2,
+                name: None,
+                description: None,
+                force: true,
+            },
+            false,
+        )
+        .expect("seed flow");
+        let resolver = fixture_registry_resolver();
+        handle_add_step(
+            AddStepArgs {
+                component_id: None,
+                flow_path: flow_path.clone(),
+                after: None,
+                mode: AddStepMode::Default,
+                pack_alias: None,
+                wizard_mode: Some(WizardModeArg::Default),
+                operation: None,
+                payload: "{}".to_string(),
+                routing_out: true,
+                routing_reply: false,
+                routing_next: None,
+                routing_multi_to: None,
+                routing_json: None,
+                routing_to_anchor: false,
+                config_flow: None,
+                answers: None,
+                answers_file: None,
+                answers_dir: None,
+                overwrite_answers: false,
+                reask: false,
+                locale: None,
+                interactive: false,
+                allow_cycles: false,
+                dry_run: false,
+                write: false,
+                validate_only: false,
+                manifests: Vec::new(),
+                node_id: Some("widget".to_string()),
+                component_ref: Some("oci://acme/widget:1".to_string()),
+                local_wasm: None,
+                distributor_url: None,
+                auth_token: None,
+                tenant: None,
+                env: None,
+                pack: None,
+                component_version: None,
+                abi_version: None,
+                resolver: Some(resolver),
+                pin: false,
+                allow_contract_change: false,
+            },
+            SchemaMode::Strict,
+            OutputFormat::Human,
+            false,
+        )
+        .expect("add step");
+
+        with_wizard_resolver_env(fixture_registry_resolver(), || {
+            // 2 flow list, 1 flow, 3 update step, 1 step, 2 remote, ref, 1 default mode, 6 save, then back/main/exit.
+            let input = Cursor::new("2\n1\n3\n1\n2\nrepo://acme/widget:1\n1\n6\n\n0\n0\n0\n");
+            let mut output = Vec::new();
+            super::run_wizard_menu_with_io(dir.path(), input, &mut output)
+                .expect("wizard menu update step");
+            let _rendered = String::from_utf8(output).expect("utf8");
+        });
+        let doc = load_ygtc_from_path(&flow_path).expect("load flow");
+        let flow_ir = FlowIr::from_doc(doc).expect("flow ir");
+        assert!(flow_ir.nodes.contains_key("widget"));
+    }
+
+    #[test]
+    fn wizard_local_wasm_copy_places_file_under_pack_components() {
+        let dir = tempdir().expect("temp dir");
+        let external = dir.path().join("external-widget.wasm");
+        fs::write(&external, b"\0asm....").expect("write wasm");
+        let copied =
+            super::copy_local_wasm_into_pack_components(dir.path(), &external).expect("copy wasm");
+        assert!(copied.starts_with(dir.path().join("components")));
+        assert!(copied.exists(), "copied wasm should exist");
+        let src = fs::read(&external).expect("read source");
+        let dst = fs::read(&copied).expect("read copied");
+        assert_eq!(src, dst);
     }
 
     #[test]
@@ -3305,17 +6616,22 @@ fn handle_add_step(
 
         let mut answers = parse_answers_map(args.answers.as_deref(), args.answers_file.as_deref())?;
         wizard_ops::merge_default_answers(&qa_spec, &mut answers);
+        if args.interactive && matches!(wizard_mode, wizard_ops::WizardMode::Default) {
+            seed_optional_answers_for_default_setup(&qa_spec, &mut answers);
+        }
         if !qa_spec.questions.is_empty() {
             qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
             println!(
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
             );
-            if args.interactive {
-                answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
-            } else {
-                qa_runner::validate_required(&qa_spec, &catalog, &locale, &answers)?;
-            }
+            answers = run_component_qa_with_qa_lib(
+                &qa_spec,
+                &catalog,
+                &locale,
+                answers,
+                args.interactive,
+            )?;
         }
 
         let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
@@ -3734,17 +7050,22 @@ fn handle_update_step(
         let answers_file = args.answers_file.as_deref().or(fallback_path.as_deref());
         let mut answers = parse_answers_map(args.answers.as_deref(), answers_file)?;
         wizard_ops::merge_default_answers(&qa_spec, &mut answers);
+        if args.interactive && matches!(wizard_mode, wizard_ops::WizardMode::Default) {
+            seed_optional_answers_for_default_setup(&qa_spec, &mut answers);
+        }
         if !qa_spec.questions.is_empty() {
             qa_runner::warn_unknown_keys(&answers, &qa_spec, &catalog, &locale);
             println!(
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
             );
-            if args.interactive {
-                answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
-            } else {
-                qa_runner::validate_required(&qa_spec, &catalog, &locale, &answers)?;
-            }
+            answers = run_component_qa_with_qa_lib(
+                &qa_spec,
+                &catalog,
+                &locale,
+                answers,
+                args.interactive,
+            )?;
         }
 
         let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
@@ -4102,11 +7423,13 @@ fn handle_delete_step(args: DeleteStepArgs, format: OutputFormat, backup: bool) 
                 "{}",
                 wizard_header(&component_identity, wizard_mode.as_str())
             );
-            if args.interactive {
-                answers = qa_runner::run_interactive(&qa_spec, &catalog, &locale, answers)?;
-            } else {
-                qa_runner::validate_required(&qa_spec, &catalog, &locale, &answers)?;
-            }
+            answers = run_component_qa_with_qa_lib(
+                &qa_spec,
+                &catalog,
+                &locale,
+                answers,
+                args.interactive,
+            )?;
         }
 
         let answers_cbor = wizard_ops::answers_to_cbor(&answers)?;
@@ -4367,6 +7690,20 @@ fn parse_answers_map(
         merged.extend(obj.clone());
     }
     Ok(merged)
+}
+
+fn seed_optional_answers_for_default_setup(
+    qa_spec: &greentic_types::schemas::component::v0_6_0::ComponentQaSpec,
+    answers: &mut QuestionAnswers,
+) {
+    for question in &qa_spec.questions {
+        if question.required || question.default.is_some() {
+            continue;
+        }
+        answers
+            .entry(question.id.clone())
+            .or_insert(serde_json::Value::Null);
+    }
 }
 
 fn merge_payload(base: serde_json::Value, overlay: Option<serde_json::Value>) -> serde_json::Value {

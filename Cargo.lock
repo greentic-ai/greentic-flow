@@ -438,6 +438,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "component-qa"
+version = "0.4.5"
+dependencies = [
+ "qa-spec 0.4.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "console"
 version = "0.15.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1263,9 +1273,12 @@ dependencies = [
  "ciborium",
  "clap",
  "greentic-distributor-client",
+ "greentic-i18n-translator",
  "greentic-interfaces-host",
+ "greentic-qa-lib",
  "greentic-types",
  "handlebars",
+ "include_dir",
  "indexmap",
  "insta",
  "jsonschema",
@@ -1273,7 +1286,7 @@ dependencies = [
  "pathdiff",
  "predicates",
  "pretty_assertions",
- "qa-spec",
+ "qa-spec 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "regex",
  "semver",
  "serde",
@@ -1289,6 +1302,16 @@ dependencies = [
  "unic-langid",
  "url",
  "wasmtime",
+]
+
+[[package]]
+name = "greentic-i18n-translator"
+version = "0.4.6"
+dependencies = [
+ "blake3",
+ "clap",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1332,6 +1355,17 @@ dependencies = [
  "serde",
  "serde_json",
  "wasmtime",
+]
+
+[[package]]
+name = "greentic-qa-lib"
+version = "0.4.5"
+dependencies = [
+ "component-qa",
+ "qa-spec 0.4.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1773,6 +1807,25 @@ dependencies = [
  "sized-chunks",
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "include_dir"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
+dependencies = [
+ "include_dir_macros",
+]
+
+[[package]]
+name = "include_dir_macros"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
+dependencies = [
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
@@ -2581,6 +2634,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "qa-spec"
+version = "0.4.5"
+dependencies = [
+ "globset",
+ "handlebars",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_cbor",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

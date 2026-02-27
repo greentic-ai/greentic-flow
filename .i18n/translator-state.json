@@ -1,0 +1,37 @@
+{
+  "version": 0,
+  "langs": {
+    "es": {
+      "keys": {
+        "flow.alpha.title": {
+          "last_english_hash": "1c9ca2b2e5a09281580f24fdd48f9d17b04cf4f22842fceec8e1245d1b52e8ea",
+          "last_bot_translation_hash": "a9d66dde6ed3433187749c3017eaa94ce6e61044f371138ec9de81a1ae01c706",
+          "engine": "codex-cli",
+          "timestamp_epoch_secs": 1772202976
+        },
+        "flow.beta.title": {
+          "last_english_hash": "0eae1daec8a4563a5511ea7397bf650ce8315c0f248ecfc6b31e57b6e8488d09",
+          "last_bot_translation_hash": "0eae1daec8a4563a5511ea7397bf650ce8315c0f248ecfc6b31e57b6e8488d09",
+          "engine": "codex-cli",
+          "timestamp_epoch_secs": 1772202976
+        }
+      }
+    },
+    "fr": {
+      "keys": {
+        "flow.alpha.title": {
+          "last_english_hash": "1c9ca2b2e5a09281580f24fdd48f9d17b04cf4f22842fceec8e1245d1b52e8ea",
+          "last_bot_translation_hash": "1c9ca2b2e5a09281580f24fdd48f9d17b04cf4f22842fceec8e1245d1b52e8ea",
+          "engine": "codex-cli",
+          "timestamp_epoch_secs": 1772202980
+        },
+        "flow.beta.title": {
+          "last_english_hash": "0eae1daec8a4563a5511ea7397bf650ce8315c0f248ecfc6b31e57b6e8488d09",
+          "last_bot_translation_hash": "a96df26e7a6dd73fceb0b4228059270ffe5a1c18be2f7eb36bc361e2d785febe",
+          "engine": "codex-cli",
+          "timestamp_epoch_secs": 1772202980
+        }
+      }
+    }
+  }
+}

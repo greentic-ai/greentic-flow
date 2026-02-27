@@ -32,6 +32,27 @@ fn version_flag_prints_version() {
 }
 
 #[test]
+fn wizard_help_renders_with_pack_entrypoint() {
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(contains("<PACK>"));
+}
+
+#[test]
+fn wizard_menu_allows_exit_from_main_menu() {
+    cargo_bin_cmd!("greentic-flow")
+        .arg("wizard")
+        .arg(".")
+        .write_stdin("0\n")
+        .assert()
+        .success()
+        .stdout(contains("Main Menu"));
+}
+
+#[test]
 fn new_writes_v2_empty_flow() {
     let dir = tempdir().unwrap();
     let flow_path = dir.path().join("flow.ygtc");
@@ -53,36 +74,6 @@ fn new_writes_v2_empty_flow() {
     assert_eq!(doc.id, "main");
     assert_eq!(doc.flow_type, "messaging");
     assert_eq!(doc.schema_version, Some(2));
-    assert!(doc.nodes.is_empty());
-}
-
-#[test]
-fn wizard_new_writes_v2_empty_flow_via_provider_adapter() {
-    let dir = tempdir().unwrap();
-    let flow_path = dir.path().join("flow.ygtc");
-
-    cargo_bin_cmd!("greentic-flow")
-        .arg("wizard")
-        .arg("new")
-        .arg("--flow")
-        .arg(&flow_path)
-        .arg("--id")
-        .arg("main")
-        .arg("--type")
-        .arg("messaging")
-        .arg("--name")
-        .arg("Wizard Main")
-        .arg("--description")
-        .arg("wizard flow")
-        .assert()
-        .success();
-
-    let doc = load_ygtc_from_path(&flow_path).expect("load flow");
-    assert_eq!(doc.id, "main");
-    assert_eq!(doc.flow_type, "messaging");
-    assert_eq!(doc.schema_version, Some(2));
-    assert_eq!(doc.title.as_deref(), Some("Wizard Main"));
-    assert_eq!(doc.description.as_deref(), Some("wizard flow"));
     assert!(doc.nodes.is_empty());
 }
 
@@ -1342,6 +1333,125 @@ entrypoints: {}
         .arg(&flow_path)
         .assert()
         .success();
+}
+
+#[test]
+fn doctor_fails_on_raw_summary_literals() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: raw-summary
+type: messaging
+schema_version: 2
+title: Raw title
+description: Raw description
+nodes: {}
+"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .failure()
+        .stderr(
+            contains("title must be an i18n tag").and(contains("description must be an i18n tag")),
+        );
+}
+
+#[test]
+fn doctor_fails_when_i18n_summary_key_missing_from_pack_source() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+    fs::create_dir_all(flow_path.parent().unwrap()).unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: welcome
+type: messaging
+schema_version: 2
+title: i18n:flow.welcome.title
+description: i18n:flow.welcome.description
+nodes: {}
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.path().join("i18n")).unwrap();
+    fs::write(
+        dir.path().join("i18n/en-GB.json"),
+        r#"{"flow.welcome.title":"Welcome"}"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .failure()
+        .stderr(contains(
+            "description i18n key 'flow.welcome.description' missing from pack i18n/en-GB.json",
+        ));
+}
+
+#[test]
+fn doctor_accepts_i18n_summary_keys_present_in_pack_source() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flows/global/messaging/welcome.ygtc");
+    fs::create_dir_all(flow_path.parent().unwrap()).unwrap();
+    fs::write(
+        &flow_path,
+        r#"id: welcome
+type: messaging
+schema_version: 2
+title: i18n:flow.welcome.title
+description: i18n:flow.welcome.description
+nodes: {}
+parameters: {}
+tags: []
+entrypoints: {}
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.path().join("i18n")).unwrap();
+    fs::write(
+        dir.path().join("i18n/en-GB.json"),
+        r#"{"flow.welcome.title":"Welcome","flow.welcome.description":"Greeting flow"}"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("doctor")
+        .arg(&flow_path)
+        .assert()
+        .success();
+}
+
+#[test]
+fn doctor_json_reports_raw_summary_i18n_lint_errors() {
+    let dir = tempdir().unwrap();
+    let flow_path = dir.path().join("flow.ygtc");
+    fs::write(
+        &flow_path,
+        r#"id: raw-summary
+type: messaging
+schema_version: 2
+title: Raw title
+description: Raw description
+nodes: {}
+"#,
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("greentic-flow")
+        .arg("doctor")
+        .arg("--json")
+        .arg(&flow_path)
+        .assert()
+        .failure()
+        .stdout(
+            contains("title must be an i18n tag").and(contains("description must be an i18n tag")),
+        );
 }
 
 #[test]
