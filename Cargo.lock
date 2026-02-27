@@ -440,8 +440,10 @@ dependencies = [
 [[package]]
 name = "component-qa"
 version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48b8862c31b3be023a33ee860be940d9eb07206ef33db05cc0f98575a38ff02f"
 dependencies = [
- "qa-spec 0.4.5",
+ "qa-spec",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1286,7 +1288,7 @@ dependencies = [
  "pathdiff",
  "predicates",
  "pretty_assertions",
- "qa-spec 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "qa-spec",
  "regex",
  "semver",
  "serde",
@@ -1307,6 +1309,8 @@ dependencies = [
 [[package]]
 name = "greentic-i18n-translator"
 version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebf415e25ae7e42f95c7767b2512050df33f7dfa681f81ac7f3a25b7f6777c6d"
 dependencies = [
  "blake3",
  "clap",
@@ -1360,9 +1364,11 @@ dependencies = [
 [[package]]
 name = "greentic-qa-lib"
 version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25a87e014208a9a3008079382947aef806e4baa238c55e8b9bc1e783966ce6a1"
 dependencies = [
  "component-qa",
- "qa-spec 0.4.5",
+ "qa-spec",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2634,20 +2640,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "qa-spec"
-version = "0.4.5"
-dependencies = [
- "globset",
- "handlebars",
- "regex",
- "schemars",
- "serde",
- "serde_cbor",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
