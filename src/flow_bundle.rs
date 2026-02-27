@@ -187,4 +187,3 @@ fn resolve_entry(doc: &crate::model::FlowDoc) -> String {
     }
     doc.nodes.keys().next().cloned().unwrap_or_default()
 }
-
