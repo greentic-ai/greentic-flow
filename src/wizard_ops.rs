@@ -67,13 +67,75 @@ pub struct WizardSpecOutput {
 mod host {
     use super::*;
     use greentic_interfaces_host::component_v0_6::exports::greentic::component::node as canonical_node;
+    use greentic_interfaces_wasmtime::host_helpers::v1::state_store::{
+        OpAck, StateKey, StateStoreError, StateStoreHost, TenantCtx as StateTenantCtx,
+        add_state_store_to_linker,
+    };
     use wasmtime::component::{Component, Linker};
+    use wasmtime::component::{ResourceTable, Val};
     use wasmtime::{Config, Engine, Store, StoreContextMut};
+    use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
     mod runtime {
         pub use greentic_interfaces_host::component_v0_6::exports::greentic::component::node;
         pub use greentic_interfaces_host::component_v0_6::greentic::types_core::core;
         pub type RuntimeComponent = greentic_interfaces_host::component_v0_6::ComponentV0V6V0;
+    }
+
+    struct HostState {
+        wasi: WasiCtx,
+        table: ResourceTable,
+        state_store: NoopStateStore,
+    }
+
+    struct NoopStateStore;
+
+    impl StateStoreHost for NoopStateStore {
+        fn read(
+            &mut self,
+            _key: StateKey,
+            _ctx: Option<StateTenantCtx>,
+        ) -> std::result::Result<Vec<u8>, StateStoreError> {
+            Ok(Vec::new())
+        }
+
+        fn write(
+            &mut self,
+            _key: StateKey,
+            _bytes: Vec<u8>,
+            _ctx: Option<StateTenantCtx>,
+        ) -> std::result::Result<OpAck, StateStoreError> {
+            Ok(OpAck::Ok)
+        }
+
+        fn delete(
+            &mut self,
+            _key: StateKey,
+            _ctx: Option<StateTenantCtx>,
+        ) -> std::result::Result<OpAck, StateStoreError> {
+            Ok(OpAck::Ok)
+        }
+    }
+
+    impl HostState {
+        fn new() -> Self {
+            Self {
+                // Keep a minimal WASI context; this still provides the imports
+                // expected by components that read CLI env/args.
+                wasi: WasiCtxBuilder::new().build(),
+                table: ResourceTable::new(),
+                state_store: NoopStateStore,
+            }
+        }
+    }
+
+    impl WasiView for HostState {
+        fn ctx(&mut self) -> WasiCtxView<'_> {
+            WasiCtxView {
+                ctx: &mut self.wasi,
+                table: &mut self.table,
+            }
+        }
     }
 
     fn build_engine() -> Result<Engine> {
@@ -82,20 +144,57 @@ mod host {
         Engine::new(&config).map_err(|err| anyhow!("init wasm engine: {err}"))
     }
 
-    fn add_control_imports(linker: &mut Linker<()>) -> Result<()> {
+    fn add_wasi_imports(linker: &mut Linker<HostState>) -> Result<()> {
+        wasmtime_wasi::p2::add_to_linker_sync(linker)
+            .map_err(|err| anyhow!("link wasi imports: {err}"))?;
+        add_state_store_to_linker(linker, |state: &mut HostState| &mut state.state_store)
+            .map_err(|err| anyhow!("link state store imports: {err}"))?;
+        add_wasi_cli_environment_0_2_3_compat(linker)?;
+        Ok(())
+    }
+
+    fn add_wasi_cli_environment_0_2_3_compat(linker: &mut Linker<HostState>) -> Result<()> {
+        let mut inst = linker
+            .instance("wasi:cli/environment@0.2.3")
+            .map_err(|err| anyhow!("link wasi:cli/environment@0.2.3 import: {err}"))?;
+        inst.func_wrap(
+            "get-environment",
+            |_caller: StoreContextMut<'_, HostState>,
+             (): ()|
+             -> wasmtime::Result<(Vec<(String, String)>,)> { Ok((Vec::new(),)) },
+        )
+        .map_err(|err| anyhow!("link wasi:cli/environment@0.2.3.get-environment: {err}"))?;
+        inst.func_wrap(
+            "get-arguments",
+            |_caller: StoreContextMut<'_, HostState>, (): ()| -> wasmtime::Result<(Vec<String>,)> {
+                Ok((Vec::new(),))
+            },
+        )
+        .map_err(|err| anyhow!("link wasi:cli/environment@0.2.3.get-arguments: {err}"))?;
+        inst.func_wrap(
+            "initial-cwd",
+            |_caller: StoreContextMut<'_, HostState>,
+             (): ()|
+             -> wasmtime::Result<(Option<String>,)> { Ok((None,)) },
+        )
+        .map_err(|err| anyhow!("link wasi:cli/environment@0.2.3.initial-cwd: {err}"))?;
+        Ok(())
+    }
+
+    fn add_control_imports(linker: &mut Linker<HostState>) -> Result<()> {
         let mut inst = linker
             .instance("greentic:component/control@0.6.0")
             .map_err(|err| anyhow!("link control import: {err}"))?;
         inst.func_wrap(
             "should-cancel",
-            |_caller: StoreContextMut<'_, ()>, (): ()| -> wasmtime::Result<(bool,)> {
+            |_caller: StoreContextMut<'_, HostState>, (): ()| -> wasmtime::Result<(bool,)> {
                 Ok((false,))
             },
         )
         .map_err(|err| anyhow!("link control.should-cancel: {err}"))?;
         inst.func_wrap(
             "yield-now",
-            |_caller: StoreContextMut<'_, ()>, (): ()| -> wasmtime::Result<()> { Ok(()) },
+            |_caller: StoreContextMut<'_, HostState>, (): ()| -> wasmtime::Result<()> { Ok(()) },
         )
         .map_err(|err| anyhow!("link control.yield-now: {err}"))?;
         Ok(())
@@ -318,9 +417,10 @@ mod host {
         let engine = build_engine()?;
         let component = Component::from_binary(&engine, wasm_bytes)
             .map_err(|err| anyhow!("load component: {err}"))?;
-        let mut linker: Linker<()> = Linker::new(&engine);
+        let mut linker: Linker<HostState> = Linker::new(&engine);
+        add_wasi_imports(&mut linker)?;
         add_control_imports(&mut linker)?;
-        let mut store = Store::new(&engine, ());
+        let mut store = Store::new(&engine, HostState::new());
         let api = runtime::RuntimeComponent::instantiate(&mut store, &component, &linker)
             .map_err(|err| anyhow!("instantiate canonical component world: {err}"))?;
         let node = api.greentic_component_node();
@@ -346,23 +446,245 @@ mod host {
         Ok(output_cbor)
     }
 
+    fn descriptor_mode_name(mode: WizardMode) -> &'static str {
+        match mode {
+            WizardMode::Default => "default",
+            WizardMode::Setup => "setup",
+            WizardMode::Update => "update",
+            WizardMode::Remove => "remove",
+        }
+    }
+
+    fn is_missing_node_instance_error(err: &anyhow::Error) -> bool {
+        format!("{err:#}").contains("no exported instance named `greentic:component/node@0.6.0`")
+    }
+
+    fn is_missing_setup_contract_error(err: &anyhow::Error) -> bool {
+        let msg = format!("{err:#}");
+        msg.contains("component descriptor missing setup.qa-spec")
+            || msg.contains(
+                "component descriptor does not advertise required op 'setup.apply_answers'",
+            )
+    }
+
+    fn is_missing_setup_apply_error(err: &anyhow::Error) -> bool {
+        format!("{err:#}").contains("setup.apply_answers")
+    }
+
+    fn instantiate_root(
+        wasm_bytes: &[u8],
+        add_control: bool,
+    ) -> Result<(Store<HostState>, wasmtime::component::Instance)> {
+        let engine = build_engine()?;
+        let component = Component::from_binary(&engine, wasm_bytes)
+            .map_err(|err| anyhow!("load component: {err}"))?;
+        let mut linker: Linker<HostState> = Linker::new(&engine);
+        add_wasi_imports(&mut linker)?;
+        if add_control {
+            add_control_imports(&mut linker)?;
+        }
+        let mut store = Store::new(&engine, HostState::new());
+        let instance = linker
+            .instantiate(&mut store, &component)
+            .map_err(|err| anyhow!("instantiate component root world: {err}"))?;
+        Ok((store, instance))
+    }
+
+    fn find_export_index(
+        store: &mut Store<HostState>,
+        instance: &wasmtime::component::Instance,
+        parent: Option<&wasmtime::component::ComponentExportIndex>,
+        names: &[&str],
+    ) -> Option<wasmtime::component::ComponentExportIndex> {
+        for name in names {
+            if let Some(index) = instance.get_export_index(&mut *store, parent, name) {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn fetch_descriptor_spec(wasm_bytes: &[u8], mode: WizardMode) -> Result<WizardSpecOutput> {
+        let (mut store, instance) = instantiate_root(wasm_bytes, false)?;
+        let descriptor_instance = find_export_index(
+            &mut store,
+            &instance,
+            None,
+            &[
+                "component-descriptor",
+                "greentic:component/component-descriptor",
+                "greentic:component/component-descriptor@0.6.0",
+            ],
+        );
+        let describe_cbor = if let Some(descriptor_instance) = descriptor_instance {
+            let describe_export = find_export_index(
+                &mut store,
+                &instance,
+                Some(&descriptor_instance),
+                &[
+                    "describe",
+                    "greentic:component/component-descriptor@0.6.0#describe",
+                ],
+            );
+            if let Some(describe_export) = describe_export {
+                let describe_func = instance
+                    .get_typed_func::<(), (Vec<u8>,)>(&mut store, &describe_export)
+                    .map_err(|err| anyhow!("lookup component-descriptor.describe: {err}"))?;
+                let (describe_cbor,) = describe_func
+                    .call(&mut store, ())
+                    .map_err(|err| anyhow!("call component-descriptor.describe: {err}"))?;
+                describe_cbor
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let qa_instance = find_export_index(
+            &mut store,
+            &instance,
+            None,
+            &[
+                "component-qa",
+                "greentic:component/component-qa",
+                "greentic:component/component-qa@0.6.0",
+            ],
+        )
+        .ok_or_else(|| anyhow!("missing exported component-qa instance"))?;
+        let qa_spec_export = find_export_index(
+            &mut store,
+            &instance,
+            Some(&qa_instance),
+            &["qa-spec", "greentic:component/component-qa@0.6.0#qa-spec"],
+        )
+        .ok_or_else(|| anyhow!("missing exported component-qa.qa-spec function"))?;
+        let qa_spec_cbor = call_exported_bytes(
+            &mut store,
+            &instance,
+            &qa_spec_export,
+            &[Val::Enum(descriptor_mode_name(mode).to_string())],
+            "component-qa.qa-spec",
+        )?;
+
+        Ok(WizardSpecOutput {
+            abi: WizardAbi::V6,
+            describe_cbor,
+            descriptor: None,
+            qa_spec_cbor,
+            answers_schema_cbor: None,
+        })
+    }
+
+    fn apply_descriptor_answers(
+        wasm_bytes: &[u8],
+        mode: WizardMode,
+        current_config: &[u8],
+        answers: &[u8],
+    ) -> Result<Vec<u8>> {
+        let (mut store, instance) = instantiate_root(wasm_bytes, false)?;
+        let qa_instance = find_export_index(
+            &mut store,
+            &instance,
+            None,
+            &[
+                "component-qa",
+                "greentic:component/component-qa",
+                "greentic:component/component-qa@0.6.0",
+            ],
+        )
+        .ok_or_else(|| anyhow!("missing exported component-qa instance"))?;
+        let apply_export = find_export_index(
+            &mut store,
+            &instance,
+            Some(&qa_instance),
+            &[
+                "apply-answers",
+                "greentic:component/component-qa@0.6.0#apply-answers",
+            ],
+        )
+        .ok_or_else(|| anyhow!("missing exported component-qa.apply-answers function"))?;
+        call_exported_bytes(
+            &mut store,
+            &instance,
+            &apply_export,
+            &[
+                Val::Enum(descriptor_mode_name(mode).to_string()),
+                bytes_to_val(current_config),
+                bytes_to_val(answers),
+            ],
+            "component-qa.apply-answers",
+        )
+    }
+
+    fn bytes_to_val(bytes: &[u8]) -> Val {
+        Val::List(bytes.iter().copied().map(Val::U8).collect())
+    }
+
+    fn val_to_bytes(value: &Val) -> Result<Vec<u8>> {
+        match value {
+            Val::List(values) => values
+                .iter()
+                .map(|value| match value {
+                    Val::U8(byte) => Ok(*byte),
+                    other => Err(anyhow!("expected list<u8> item, got {other:?}")),
+                })
+                .collect(),
+            other => Err(anyhow!("expected list<u8> result, got {other:?}")),
+        }
+    }
+
+    fn call_exported_bytes(
+        store: &mut Store<HostState>,
+        instance: &wasmtime::component::Instance,
+        export: &wasmtime::component::ComponentExportIndex,
+        params: &[Val],
+        label: &str,
+    ) -> Result<Vec<u8>> {
+        let func = instance
+            .get_func(&mut *store, export)
+            .ok_or_else(|| anyhow!("lookup {label}: function export not found"))?;
+        let mut results = [Val::Bool(false)];
+        func.call(&mut *store, params, &mut results)
+            .map_err(|err| anyhow!("call {label}: {err}"))?;
+        val_to_bytes(&results[0]).map_err(|err| anyhow!("{label} returned invalid bytes: {err}"))
+    }
+
     pub fn fetch_wizard_spec(wasm_bytes: &[u8], _mode: WizardMode) -> Result<WizardSpecOutput> {
         let engine = build_engine()?;
         let component = Component::from_binary(&engine, wasm_bytes)
             .map_err(|err| anyhow!("load component: {err}"))?;
-        let mut linker: Linker<()> = Linker::new(&engine);
+        let mut linker: Linker<HostState> = Linker::new(&engine);
+        add_wasi_imports(&mut linker)?;
         add_control_imports(&mut linker)?;
-        let mut store = Store::new(&engine, ());
-        let api = runtime::RuntimeComponent::instantiate(&mut store, &component, &linker)
-            .map_err(|err| anyhow!("instantiate canonical component world: {err}"))?;
+        let mut store = Store::new(&engine, HostState::new());
+        let api = match runtime::RuntimeComponent::instantiate(&mut store, &component, &linker) {
+            Ok(api) => api,
+            Err(err) => {
+                let err = anyhow!("instantiate canonical component world: {err}");
+                if is_missing_node_instance_error(&err) {
+                    return fetch_descriptor_spec(wasm_bytes, _mode);
+                }
+                return Err(err);
+            }
+        };
         let node = api.greentic_component_node();
 
         let descriptor = node
             .call_describe(&mut store)
             .map(convert_descriptor)
             .map_err(|err| anyhow!("call describe: {err}"))?;
-        let (qa_spec_cbor, answers_schema_cbor) = extract_setup_contract(&descriptor)?;
-        ensure_setup_apply_answers_op(&descriptor)?;
+        let (qa_spec_cbor, answers_schema_cbor) = match extract_setup_contract(&descriptor)
+            .and_then(|(qa_spec_cbor, answers_schema_cbor)| {
+                ensure_setup_apply_answers_op(&descriptor)?;
+                Ok((qa_spec_cbor, answers_schema_cbor))
+            }) {
+            Ok(values) => values,
+            Err(err) if is_missing_setup_contract_error(&err) => {
+                return fetch_descriptor_spec(wasm_bytes, _mode);
+            }
+            Err(err) => return Err(err),
+        };
 
         Ok(WizardSpecOutput {
             abi: WizardAbi::V6,
@@ -380,7 +702,15 @@ mod host {
         current_config: &[u8],
         answers: &[u8],
     ) -> Result<Vec<u8>> {
-        invoke_setup_apply(wasm_bytes, mode, current_config, answers)
+        match invoke_setup_apply(wasm_bytes, mode, current_config, answers) {
+            Ok(config) => Ok(config),
+            Err(err)
+                if is_missing_node_instance_error(&err) || is_missing_setup_apply_error(&err) =>
+            {
+                apply_descriptor_answers(wasm_bytes, mode, current_config, answers)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub fn run_wizard_ops(

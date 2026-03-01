@@ -205,17 +205,86 @@ fn write_prompt<W: Write>(
 
 fn read_line<R: Read>(reader: &mut R, buf: &mut String) -> Result<bool> {
     let mut bytes = Vec::new();
+    let mut cursor = 0usize;
     let mut byte = [0u8; 1];
     let mut read_any = false;
     while reader.read(&mut byte).context("read input")? == 1 {
         read_any = true;
-        if byte[0] == b'\n' {
-            break;
+        match byte[0] {
+            b'\n' => break,
+            b'\r' => continue,
+            // Backspace (Ctrl+H) and DEL.
+            0x08 | 0x7f => {
+                if cursor > 0 {
+                    cursor -= 1;
+                    bytes.remove(cursor);
+                }
+            }
+            // Ctrl+A / Ctrl+E.
+            0x01 => cursor = 0,
+            0x05 => cursor = bytes.len(),
+            // ANSI escape sequence (arrow keys/home/end/delete).
+            0x1b => consume_escape_sequence(reader, &mut bytes, &mut cursor)?,
+            b if b.is_ascii_control() => {}
+            b => {
+                bytes.insert(cursor, b);
+                cursor += 1;
+            }
         }
-        bytes.push(byte[0]);
     }
     *buf = String::from_utf8(bytes).context("parse input as UTF-8")?;
     Ok(read_any)
+}
+
+fn consume_escape_sequence<R: Read>(
+    reader: &mut R,
+    bytes: &mut Vec<u8>,
+    cursor: &mut usize,
+) -> Result<()> {
+    let mut next = [0u8; 1];
+    if reader.read(&mut next).context("read escape sequence")? != 1 {
+        return Ok(());
+    }
+    if next[0] != b'[' {
+        return Ok(());
+    }
+
+    let mut seq = Vec::new();
+    loop {
+        let mut b = [0u8; 1];
+        if reader.read(&mut b).context("read escape sequence")? != 1 {
+            return Ok(());
+        }
+        seq.push(b[0]);
+        if b[0].is_ascii_alphabetic() || b[0] == b'~' {
+            break;
+        }
+        if seq.len() > 8 {
+            return Ok(());
+        }
+    }
+
+    match seq.as_slice() {
+        [b'D'] => {
+            if *cursor > 0 {
+                *cursor -= 1;
+            }
+        }
+        [b'C'] => {
+            if *cursor < bytes.len() {
+                *cursor += 1;
+            }
+        }
+        [b'H'] | [b'1', b'~'] | [b'7', b'~'] => *cursor = 0,
+        [b'F'] | [b'4', b'~'] | [b'8', b'~'] => *cursor = bytes.len(),
+        [b'3', b'~'] => {
+            if *cursor < bytes.len() {
+                bytes.remove(*cursor);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn parse_answer(raw: &str, question: &Question) -> Result<Value> {
@@ -726,5 +795,23 @@ mod tests {
         let actions = output.get("actions").and_then(Value::as_array).unwrap();
         let first = actions[0].as_object().unwrap();
         assert_eq!(first.get("id").and_then(Value::as_str), Some("action-1"));
+    }
+
+    #[test]
+    fn read_line_supports_backspace_and_arrow_edits() {
+        let mut input = Cursor::new(b"abc\x1b[D\x1b[D\x7fX\n".to_vec());
+        let mut buf = String::new();
+        let read_any = read_line(&mut input, &mut buf).expect("read line");
+        assert!(read_any);
+        assert_eq!(buf, "Xbc");
+    }
+
+    #[test]
+    fn read_line_supports_home_end_and_delete() {
+        let mut input = Cursor::new(b"abcd\x1b[D\x1b[D\x1b[D\x1b[3~X\x1b[H*\x1b[F!\n".to_vec());
+        let mut buf = String::new();
+        let read_any = read_line(&mut input, &mut buf).expect("read line");
+        assert!(read_any);
+        assert_eq!(buf, "*aXcd!");
     }
 }
