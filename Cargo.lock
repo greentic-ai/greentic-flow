@@ -1493,14 +1493,15 @@ dependencies = [
 
 [[package]]
 name = "greentic-qa-lib"
-version = "0.4.5"
+version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25a87e014208a9a3008079382947aef806e4baa238c55e8b9bc1e783966ce6a1"
+checksum = "53948b5762eb6bf5259d1a3e36fd740549dee95e72cd8074ec7dd5094f3d6d7c"
 dependencies = [
  "component-qa",
  "qa-spec",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
