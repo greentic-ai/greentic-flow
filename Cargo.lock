@@ -1422,9 +1422,9 @@ dependencies = [
 
 [[package]]
 name = "greentic-i18n-translator"
-version = "0.4.6"
+version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebf415e25ae7e42f95c7767b2512050df33f7dfa681f81ac7f3a25b7f6777c6d"
+checksum = "8ce272e02d54c11eb2eb8ccd13638d17584f7d4f664a0009288594f5356d8989"
 dependencies = [
  "blake3",
  "clap",
