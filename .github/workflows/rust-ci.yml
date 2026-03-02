@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Remove local cargo override config if present
+        run: rm -f .cargo/config.toml
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
           toolchain: 1.91.0
@@ -32,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Remove local cargo override config if present
+        run: rm -f .cargo/config.toml
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
           toolchain: 1.91.0
@@ -53,6 +57,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Remove local cargo override config if present
+        run: rm -f .cargo/config.toml
       - uses: dtolnay/rust-toolchain@1.91.0
         with:
           toolchain: 1.91.0
